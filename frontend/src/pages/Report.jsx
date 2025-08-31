@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import axios from "axios";
 
 export default function Report() {
@@ -9,16 +9,29 @@ export default function Report() {
     phone: "", 
     desc: "" 
   });
+  const [showPopup, setShowPopup] = useState(false);
+  const [error, setError] = useState("");
 
   const handleSubmit = async () => {
     try {
       await axios.post(`${import.meta.env.VITE_API_URL}/api/report`, form);
-      alert("✅ İhbarınız alınmıştır. İnceleme başlatılacaktır.");
+      setShowPopup(true); // ✅ Başarılı olduğunda popup aç
+      setError("");
       setForm({ name: "", instagramUsername: "", instagramUrl: "", phone: "", desc: "" });
     } catch {
-      alert("❌ İhbar gönderilirken bir hata oluştu.");
+      setError("❌ İhbar gönderilirken bir hata oluştu.");
     }
   };
+
+  // ✅ Popup açıldığında 3sn sonra otomatik kapat
+  useEffect(() => {
+    if (showPopup) {
+      const timer = setTimeout(() => {
+        setShowPopup(false);
+      }, 3000);
+      return () => clearTimeout(timer); // cleanup
+    }
+  }, [showPopup]);
 
   return (
     <div style={{ padding: "40px", maxWidth: "600px", margin: "auto", fontFamily: "Segoe UI, sans-serif" }}>
@@ -75,6 +88,35 @@ export default function Report() {
       >
         Gönder
       </button>
+
+      {error && <p style={{ marginTop: "15px", textAlign: "center", color: "red" }}>{error}</p>}
+
+      {/* ✅ Popup */}
+      {showPopup && (
+        <div style={popupOverlay}>
+          <div style={popupBox}>
+            <h3>İhbarınız İçin Teşekkür Ederiz</h3>
+            <p>
+              İhbarınız için gerekli incelemeleri başlatıyoruz. <br />
+              <b>“Duyarlı vatandaş, güvenli toplum”</b> ilkemizi benimsediğiniz için teşekkür ederiz.
+            </p>
+            <button
+              onClick={() => setShowPopup(false)}
+              style={{
+                marginTop: "15px",
+                padding: "10px 20px",
+                backgroundColor: "#c0392b",
+                color: "#fff",
+                border: "none",
+                borderRadius: "6px",
+                cursor: "pointer"
+              }}
+            >
+              Kapat
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -87,4 +129,26 @@ const inputStyle = {
   borderRadius: "8px",
   border: "1px solid #ccc",
   fontSize: "15px"
+};
+
+const popupOverlay = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: "rgba(0,0,0,0.5)",
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  zIndex: 1000
+};
+
+const popupBox = {
+  backgroundColor: "#fff",
+  padding: "25px",
+  borderRadius: "10px",
+  maxWidth: "450px",
+  textAlign: "center",
+  boxShadow: "0px 4px 15px rgba(0,0,0,0.3)"
 };
