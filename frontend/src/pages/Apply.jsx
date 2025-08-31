@@ -4,22 +4,24 @@ import axios from "axios";
 export default function Apply() {
   const [form, setForm] = useState({
     name: "",
-    type: "", // ✅ Yeni alan
+    type: "",
     instagramUsername: "",
     instagramUrl: "",
     phone: "",
     address: "",
     email: ""
   });
-  const [success, setSuccess] = useState("");
+  const [showPopup, setShowPopup] = useState(false);
+  const [error, setError] = useState("");
 
   const handleSubmit = async () => {
     try {
       await axios.post(`${import.meta.env.VITE_API_URL}/api/apply`, form);
-      setSuccess("✅ Başvurunuz alınmıştır. En kısa sürede incelenecektir.");
+      setShowPopup(true); // ✅ Başvuru başarılı -> popup aç
+      setError("");
       setForm({ name: "", type: "", instagramUsername: "", instagramUrl: "", phone: "", address: "", email: "" });
     } catch {
-      setSuccess("❌ Başvuru gönderilirken bir hata oluştu.");
+      setError("❌ Başvuru gönderilirken bir hata oluştu.");
     }
   };
 
@@ -90,7 +92,31 @@ export default function Apply() {
         Gönder
       </button>
 
-      {success && <p style={{ marginTop: "15px", textAlign: "center" }}>{success}</p>}
+      {error && <p style={{ marginTop: "15px", textAlign: "center", color: "red" }}>{error}</p>}
+
+      {/* ✅ Popup */}
+      {showPopup && (
+        <div style={popupOverlay}>
+          <div style={popupBox}>
+            <h3>Başvurunuz Değerlendirmeye Alınmıştır</h3>
+            <p>En kısa sürede değerlendirilip size mail üzerinden bilgi verilecektir.</p>
+            <button
+              onClick={() => setShowPopup(false)}
+              style={{
+                marginTop: "15px",
+                padding: "10px 20px",
+                backgroundColor: "#27ae60",
+                color: "#fff",
+                border: "none",
+                borderRadius: "6px",
+                cursor: "pointer"
+              }}
+            >
+              Kapat
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -103,4 +129,26 @@ const inputStyle = {
   borderRadius: "8px",
   border: "1px solid #ccc",
   fontSize: "15px"
+};
+
+const popupOverlay = {
+  position: "fixed",
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+  backgroundColor: "rgba(0,0,0,0.5)",
+  display: "flex",
+  justifyContent: "center",
+  alignItems: "center",
+  zIndex: 1000
+};
+
+const popupBox = {
+  backgroundColor: "#fff",
+  padding: "25px",
+  borderRadius: "10px",
+  maxWidth: "400px",
+  textAlign: "center",
+  boxShadow: "0px 4px 15px rgba(0,0,0,0.3)"
 };
