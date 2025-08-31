@@ -23,12 +23,12 @@ export default function Report() {
     }
   };
 
-  // ✅ Popup açıldığında 3sn sonra otomatik kapat
+  // ✅ Popup açıldığında 10sn sonra otomatik kapat
   useEffect(() => {
     if (showPopup) {
       const timer = setTimeout(() => {
         setShowPopup(false);
-      }, 3000);
+      }, 10000); // ⏱️ 10 saniye
       return () => clearTimeout(timer); // cleanup
     }
   }, [showPopup]);
