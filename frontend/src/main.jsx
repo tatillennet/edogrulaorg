@@ -7,6 +7,7 @@ import Dashboard from "./pages/Dashboard";
 import Search from "./pages/Search";
 import Apply from "./pages/Apply";
 import Report from "./pages/Report";
+import BusinessProfile from "./pages/BusinessProfile"; // ✅ yeni eklendi
 
 function NotFound() {
   return (
@@ -26,6 +27,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
         <Route path="/" element={<Search />} />
         <Route path="/apply" element={<Apply />} />
         <Route path="/report" element={<Report />} />
+        <Route path="/business/:id" element={<BusinessProfile />} /> {/* ✅ işletme profili */}
 
         {/* Admin tarafı */}
         <Route path="/admin/login" element={<Login />} />
