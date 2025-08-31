@@ -76,6 +76,32 @@ router.get("/search", async (req, res) => {
 });
 
 /* ------------------------------
+   📄 Tekil İşletme Getir
+   - ID'ye göre Business → yoksa Blacklist
+-------------------------------*/
+router.get("/:id", async (req, res) => {
+  try {
+    // Önce normal işletmelerde ara
+    let business = await Business.findById(req.params.id);
+    if (business) {
+      return res.json({ status: "verified", business });
+    }
+
+    // Yoksa kara listeyi kontrol et
+    let blacklisted = await Blacklist.findById(req.params.id);
+    if (blacklisted) {
+      return res.json({ status: "blacklist", business: blacklisted });
+    }
+
+    // Hiçbirinde bulunamadı
+    return res.status(404).json({ status: "not_found", message: "İşletme bulunamadı" });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: "Detail error", error: err.message });
+  }
+});
+
+/* ------------------------------
    ➕ Yeni İşletme Ekle
 -------------------------------*/
 router.post("/", auth, async (req, res) => {
