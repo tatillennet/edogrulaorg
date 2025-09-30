@@ -3,36 +3,108 @@ import Business from "../models/Business.js";
 import Report from "../models/Report.js";
 import Blacklist from "../models/Blacklist.js";
 
-const toHost = (url = "") => {
+/* ======================= yardımcılar ======================= */
+const STOP_WORDS = new Set([
+  "ev", "evleri", "otel", "otelleri", "konaklama",
+  "fiyat", "fiyatları", "fiyatlari",
+  "en", "icin", "için", "ve", "veya",
+  "yakın", "yakini", "yakınında",
+  "the", "&", "-", "–"
+]);
+
+const escapeRx = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const rx = (q = "") => new RegExp(escapeRx(q), "i");
+const normHandle = (h = "") => String(h).replace(/^@+/, "");
+const hostFrom = (url = "") => {
   try {
-    const u = new URL(url.startsWith("http") ? url : `https://${url}`);
+    const u = new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`);
     return u.hostname.replace(/^www\./, "");
   } catch { return ""; }
 };
 
-const rx = (q) => {
-  try { return new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); }
-  catch { return new RegExp(q, "i"); }
+const tokenize = (qRaw = "") =>
+  String(qRaw)
+    .toLowerCase()
+    .split(/\s+/)
+    .map(t => t.replace(/[^\p{L}\p{N}@._+-]+/gu, ""))
+    .filter(t => t && t.length > 2 && !STOP_WORDS.has(t));
+
+const buildSnippet = (b) => {
+  const feat = Array.isArray(b.features) ? b.features.filter(Boolean).slice(0, 5).join(", ") : "";
+  const first =
+    (b.description && String(b.description).trim()) ||
+    (b.summary && String(b.summary).trim()) ||
+    (feat && feat) ||
+    "";
+  if (first) return first;
+
+  const type = b.type ? String(b.type).trim() : "";
+  const loc = [b.city, b.district].filter(Boolean).join(" / ");
+  const typeText = type ? `${type} tesisi` : "işletme";
+  return [typeText, loc].filter(Boolean).join(" • ");
 };
 
-// Mümkün tüm alan adlarını kapsayan OR filtresi (sende hangi alan varsa ona denk gelir)
-const buildBusinessFilter = (re) => ({
-  $or: [
-    { name: re }, { ad: re },
-    { type: re }, { tur: re },
-    { address: re }, { adres: re },
-    { desc: re }, { aciklama: re },
-    { instagram: re }, { instagramHandle: re }, { instagram_user: re },
-    { instagramUrl: re }, { instagram_url: re },
-    { website: re }, { url: re }, { site: re },
-    { phone: re }, { telefon: re }, { tel: re },
-    { email: re }, { eposta: re },
-    { tags: re }, { etiketler: re },
-    { city: re }, { ilce: re }, { sehir: re },
-  ].map((f) => ({ ...f })),
-});
+const slugOrId = (b) => b.slug || String(b._id);
 
-export async function explore(req, res, next) {
+/**
+ * Business filtresi — verilen sorgunun token’larını alanlar üzerinde AND,
+ * her token için alanlar arasında OR uygular.
+ */
+const buildBusinessFilter = (qRaw) => {
+  const tokens = tokenize(qRaw);
+  const digits = String(qRaw).replace(/\D/g, "");
+
+  const andParts = tokens.length
+    ? tokens.map((t) => {
+        const h = normHandle(t);
+        return {
+          $or: [
+            { name: rx(t) },
+            { type: rx(t) },
+            { slug: rx(t) },
+            { handle: rx(h) },
+            { instagramUsername: new RegExp(`^@?${escapeRx(h)}$`, "i") },
+            { instagramUrl: rx(t) },
+            { website: rx(t) },
+            { address: rx(t) },
+            { city: rx(t) },
+            { district: rx(t) },
+            { description: rx(t) },
+            { summary: rx(t) },
+            { features: rx(t) },
+          ],
+        };
+      })
+    : [{
+        $or: [
+          { name: rx(qRaw) },
+          { type: rx(qRaw) },
+          { address: rx(qRaw) },
+          { city: rx(qRaw) },
+          { district: rx(qRaw) },
+          { instagramUsername: rx(qRaw) },
+          { instagramUrl: rx(qRaw) },
+          { website: rx(qRaw) },
+          { description: rx(qRaw) },
+          { summary: rx(qRaw) },
+          { features: rx(qRaw) },
+        ],
+      }];
+
+  if (digits.length >= 6) {
+    andParts.push({
+      $or: [
+        { phone: rx(digits) },
+        { phones: rx(digits) },
+      ],
+    });
+  }
+
+  return { $and: andParts };
+};
+
+/* ======================= controller ======================= */
+export async function explore(req, res) {
   try {
     const q = String(req.query.q || "").trim();
     const tab = String(req.query.tab || "all").toLowerCase();
@@ -58,92 +130,83 @@ export async function explore(req, res, next) {
       });
     }
 
-    const re = rx(q);
+    const filter = buildBusinessFilter(q);
+    const qRe = rx(q);
 
-    const [biz, reps, bls] = await Promise.all([
-      Business.find(buildBusinessFilter(re))
-        .sort({ verified: -1, updatedAt: -1, createdAt: -1 })
-        .limit(30),
-      Report.find({
-        $or: [
-          { title: re }, { description: re }, { summary: re },
-          { instagram: re }, { website: re }, { phone: re }
-        ],
-      })
-        .sort({ createdAt: -1 })
-        .limit(30),
-      Blacklist.find({
-        $or: [
-          { businessName: re }, { notes: re }, { reason: re },
-          { instagram: re }, { website: re }, { phone: re }
-        ],
-      })
-        .sort({ createdAt: -1 })
-        .limit(30),
-    ]);
-
-    // “Konaklama” anahtar sözcük sezgisi
+    // “konaklama” hissiyatı
     const lodgingLike = /(sapanca|kartepe|bungalov|otel|konaklama|villa|evleri)/i.test(q);
 
-    // Business -> “places” şeridi (varsa)
+    // Verileri topla
+    const [biz, reps, bls] = await Promise.all([
+      Business.find(filter).sort({ verified: -1, createdAt: -1 }).limit(30).lean(),
+      Report.find({
+        $or: [
+          { name: qRe },
+          { instagramUsername: qRe },
+          { instagramUrl: qRe },
+          { phone: qRe },
+          { desc: qRe },
+          { reporterEmail: qRe },
+        ],
+      }).sort({ createdAt: -1 }).limit(30).lean(),
+      // Blacklist.instagramUsername şemada '@'SIZ tutuluyor — her iki formu da yakala
+      Blacklist.find({
+        $or: [
+          { name: qRe },
+          { instagramUsername: new RegExp(`^${escapeRx(normHandle(q))}$`, "i") },
+          { instagramUrl: qRe },
+          { phone: qRe },
+          { desc: qRe },
+        ],
+      }).sort({ createdAt: -1 }).limit(30).lean(),
+    ]);
+
+    const placeholder =
+      "https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?q=80&w=800&auto=format&fit=crop";
+
+    // Üst “places” şeridi (yerel profil linkleri)
     const places = lodgingLike
-      ? biz.slice(0, 8).map((b) => {
-          const handle =
-            b.instagram || b.instagramHandle || b.instagram_user || "";
-          const site =
-            b.website || b.url || b.instagramUrl || b.instagram_url || "";
-          const images = b.images || b.photos || [];
-          return {
-            name: b.name || b.ad,
-            url: site || (handle ? `https://instagram.com/${String(handle).replace(/^@/, "")}` : "#"),
-            image: Array.isArray(images) && images[0] ? images[0] : "",
-            rating: b.rating || (b.verified ? 9.2 : 8.8),
-            votes: b.votes || 100,
-          };
-        })
+      ? biz.slice(0, 8).map((b) => ({
+          name: b.name,
+          url: `/isletme/${slugOrId(b)}`,
+          image: (Array.isArray(b.gallery) && b.gallery[0]) || placeholder,
+          rating: b.verified ? 9.2 : 8.8,
+          votes: 100,
+          slug: slugOrId(b),
+        }))
       : [];
 
-    // Organik sonuç listesi
+    // Organik sonuç listesi: önce business, sonra rapor, sonra blacklist
     const results = [
-      ...biz.map((b) => {
-        const title = b.name || b.ad || "İşletme";
-        const snippet =
-          b.desc || b.aciklama || b.address || b.adres || "";
-        const handle =
-          b.instagram || b.instagramHandle || b.instagram_user || "";
-        const site =
-          b.website || b.url || b.instagramUrl || b.instagram_url || "";
-        return {
-          title,
-          url: site || (handle ? `https://instagram.com/${String(handle).replace(/^@/, "")}` : ""),
-          snippet,
-          breadcrumbs: [toHost(site || handle)].filter(Boolean),
-          rating: b.rating,
-          votes: b.votes,
-        };
-      }),
-      ...reps.map((r1) => ({
-        title: r1.title || "Rapor",
-        url:
-          r1.website ||
-          (r1.instagram ? `https://instagram.com/${String(r1.instagram).replace(/^@/, "")}` : ""),
-        snippet: r1.summary || r1.description || "",
-        breadcrumbs: [toHost(r1.website || r1.instagram || "")].filter(Boolean),
+      ...biz.map((b) => ({
+        title: b.name,
+        url: `/isletme/${slugOrId(b)}`,
+        snippet: buildSnippet(b),
+        breadcrumbs: [`edogrula.org › ${slugOrId(b)}`],
+        slug: slugOrId(b),
+      })),
+      ...reps.map((r) => ({
+        title: r.name || "İhbar",
+        url: r.instagramUrl || r.instagramUsername
+          ? `https://instagram.com/${normHandle(r.instagramUsername)}`
+          : "",
+        snippet: r.desc || "",
+        breadcrumbs: [hostFrom(r.instagramUrl || r.reporterEmail || "")].filter(Boolean),
       })),
       ...bls.map((b1) => ({
-        title: (b1.businessName || "Kara Liste") + " – Kara Liste",
-        url:
-          b1.website ||
-          (b1.instagram ? `https://instagram.com/${String(b1.instagram).replace(/^@/, "")}` : ""),
-        snippet: b1.reason || b1.notes || "",
-        breadcrumbs: [toHost(b1.website || b1.instagram || "")].filter(Boolean),
+        title: (b1.name || "Kara Liste") + " – Kara Liste",
+        url: b1.instagramUrl || (b1.instagramUsername
+          ? `https://instagram.com/${normHandle(b1.instagramUsername)}`
+          : ""),
+        snippet: b1.desc || "",
+        breadcrumbs: [hostFrom(b1.instagramUrl || "")].filter(Boolean),
       })),
     ];
 
-    // Öneriler & trend
+    // Öneriler
     const fromDbNames = [
-      ...biz.map((b) => b.name || b.ad),
-      ...bls.map((b) => `${b.businessName} (kara liste)`),
+      ...biz.map((b) => b.name),
+      ...bls.map((b) => `${b.name} (kara liste)`),
     ].filter(Boolean);
 
     const seen = new Set();
@@ -156,22 +219,25 @@ export async function explore(req, res, next) {
       })
       .slice(0, 8);
 
+    // Trendler: IG handle’ları ve domain’ler
     const trending = [
       ...new Set(
         [
-          ...biz.map((b) => toHost(b.website || b.url || "")),
-          ...biz.map((b) =>
-            (b.instagram || b.instagramHandle || b.instagram_user)
-              ? `@${String(b.instagram || b.instagramHandle || b.instagram_user).replace(/^@/, "")}`
-              : ""
-          ),
+          ...biz.map((b) => hostFrom(b.website || b.instagramUrl || "")),
+          ...biz
+            .map((b) => b.instagramUsername)
+            .filter(Boolean)
+            .map((h) => `@${normHandle(h)}`),
         ].filter(Boolean)
       ),
     ].slice(0, 8);
 
-    res.json({
+    const location =
+      /sapanca/i.test(q) ? "Sapanca" : biz[0]?.district || biz[0]?.city || "";
+
+    return res.json({
       vertical: lodgingLike ? "lodging" : "web",
-      location: lodgingLike && /sapanca/i.test(q) ? "Sapanca" : "",
+      location,
       places,
       results,
       suggestions,
@@ -179,6 +245,20 @@ export async function explore(req, res, next) {
       tab,
     });
   } catch (e) {
-    next(e);
+    // Üretimde kullanıcıyı kırmamak için güvenli fallback
+    console.error("exploreController error:", e);
+    return res.json({
+      vertical: "web",
+      location: "",
+      places: [],
+      results: [],
+      suggestions: [
+        "sapanca bungalov evleri",
+        "instagram doğrulama",
+        "işletme telefonu sorgula",
+      ],
+      trending: [],
+      tab: String(req.query?.tab || "all").toLowerCase(),
+    });
   }
 }
