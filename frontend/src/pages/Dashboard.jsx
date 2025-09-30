@@ -152,13 +152,37 @@ export default function Dashboard() {
     }
   };
 
-  const fetchBusinesses = async () => {
-    const { data } = await tryAdminThenPublic(
-      () => http.get("/api/admin/businesses"),
-      () => http.get("/api/businesses")
-    );
-    setBusinesses(data.items || data.businesses || []);
-  };
+  // Tüm /businesses sayfalarını çekip birleştirir
+const fetchBusinesses = async () => {
+  const LIMIT = 200; // backend 50'ye sabitlese bile meta'dan pages/total alacağız
+  const call = (page = 1) =>
+    tryAdminThenPublic(
+      () => http.get("/api/admin/businesses", { params: { page, limit: LIMIT } }),
+      () => http.get("/api/businesses", { params: { page, limit: LIMIT } })
+    );
+
+  const { data: first } = await call(1);
+  const pick = (d) => d.items || d.businesses || [];
+
+  let items = pick(first);
+
+  // pages varsa onu, yoksa total/limit ile hesapla
+  const totalPages =
+    first.pages ??
+    (first.total && (first.limit || LIMIT)
+      ? Math.ceil(first.total / (first.limit || LIMIT))
+      : 1);
+
+  if (totalPages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - 1 }, (_, i) => call(i + 2))
+    );
+    for (const r of rest) items = items.concat(pick(r.data));
+  }
+
+  setBusinesses(items);
+};
+
 
   // 👇 Admin ve legacy apply endpointlerinin cevaplarını tek şemaya çevirir
   const normalizeRequests = (data) => {
@@ -495,7 +519,7 @@ export default function Dashboard() {
   useEffect(() => setPage(1), [activeTab, debouncedSearch, statusFilter, sort]);
 
   // pagination
-  const PAGE_SIZES = [10, 20, 50, 100];
+  const PAGE_SIZES = [10, 50, 50, 100];
   const pickView = () => {
     if (activeTab === "businesses") return businessesView;
     if (activeTab === "requests") return pendingView;

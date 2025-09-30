@@ -7,34 +7,33 @@ import axios from "axios";
    - Auth: localStorage("adminToken") → Authorization: Bearer
    - CSV export (Blob) + normalize list
    - Retry sadece network/time-outlarda
+   - TAM LİSTE İÇİN: listBusinesses({ all:true }) veya limit/status geç
 ------------------------------------------------------------------- */
 
-// Güvenli yol düzeltici: mutlak URL'e dokunma; baştaki "/api" varsa çıkar
+// ---------------------------- Path helper ----------------------------
 const fixPath = (p = "/") => {
   let s = String(p || "");
-  if (/^https?:\/\//i.test(s)) return s;       // mutlak URL ise bırak
+  if (/^https?:\/\//i.test(s)) return s;               // mutlak URL ise bırak
   s = s.startsWith("/") ? s : `/${s}`;
   if (/^\/api(\/|$)/i.test(s)) s = s.replace(/^\/api/i, ""); // "/api/..." -> "/..."
-  return s;
+  return s;                                             // sonuç: "/admin/..." gibi
 };
 
-// Tek axios instance (baseURL vermiyoruz)
+// -------------------------- Axios instance ---------------------------
 export const api = axios.create({
   withCredentials: true,
   timeout: 15000,
 });
 
-// İstek öncesi: token ekle + Accept + path düzelt
+// İstek interceptor: token ekle + Accept + path düzelt
 api.interceptors.request.use((config) => {
   const tok = getAdminToken();
   if (tok) config.headers = { ...(config.headers || {}), Authorization: `Bearer ${tok}` };
   if (!config.headers?.Accept) {
     config.headers = { ...(config.headers || {}), Accept: "application/json" };
   }
-  if (typeof config.url === "string") {
-    config.url = fixPath(config.url);
-  }
-  // baseURL'yi boş bırakalım ki başka bir yere eklenmesin
+  if (typeof config.url === "string") config.url = fixPath(config.url);
+  // baseURL boş kalsın (reverse proxy/aynı origin varsayımı)
   config.baseURL = "";
   return config;
 });
@@ -99,6 +98,7 @@ const normalizeList = (data, fallback = []) => {
     total,
     page,
     pages,
+    limit,
   };
 };
 
@@ -106,42 +106,65 @@ const request = async (cfg, { retry = 0 } = {}) => {
   let lastErr;
   for (let i = 0; i <= retry; i++) {
     try {
-      // URL'i burada da emniyete al
-      const url = typeof cfg.url === "string" ? fixPath(cfg.url) : cfg.url;
+      const url = typeof cfg.url === "string" ? fixPath(cfg.url) : cfg.url; // emniyet
       return await api.request({ ...cfg, url, baseURL: "" });
     } catch (e) {
       lastErr = e;
-      if (e?.response || i === retry) break; // sadece network/timeouts için retry
+      // HTTP response aldıysak retry yok; yalnız ağ/time-out vs. için tekrar dene
+      if (e?.response || i === retry) break;
       await new Promise((r) => setTimeout(r, 300 * (i + 1)));
     }
   }
   throw lastErr;
 };
 
+// .env üzerinden varsayılan limit/status (opsiyonel)
+const ENV_DEFAULT_LIMIT = Number(import.meta?.env?.VITE_ADMIN_LIST_LIMIT ?? 1000) || 1000;
+const ENV_DEFAULT_STATUS = String(import.meta?.env?.VITE_ADMIN_LIST_STATUS ?? "all").toLowerCase();
+
 /* ============================ Businesses ============================ */
 /**
  * List businesses (normalized response)
- * @param {{ q?:string, page?:number, limit?:number, sort?:string,
- *           fields?:string, from?:string, to?:string,
- *           format?:"csv", signal?:AbortSignal, retry?:number }} opts
+ * - Tümünü çekmek için: { all:true } veya { mode: 'all' }
+ * @param {{
+ *   q?:string, page?:number, limit?:number, sort?:string,
+ *   fields?:string, from?:string, to?:string, status?:"all"|"approved"|"pending"|"rejected",
+ *   verified?:boolean, hidden?:boolean,
+ *   format?:"csv", signal?:AbortSignal, retry?:number,
+ *   all?:boolean, mode?:"page"|"all", maxPages?:number
+ * }} opts
  */
 export async function listBusinesses(opts = {}) {
   const {
     q = "",
     page = 1,
-    limit = 20,
+    limit = ENV_DEFAULT_LIMIT,            // yüksek default: 1000 (618’i kapsar)
     sort = "-createdAt",
     fields = "",
     from,
     to,
+    status = ENV_DEFAULT_STATUS,          // varsayılan: 'all' → filtre yok
+    verified,
+    hidden,
     format,
     signal,
     retry = 1,
+
+    // all-fetch seçenekleri
+    all = false,
+    mode,
+    maxPages = 200,
   } = opts;
 
-  const params = cleanParams({ q, page, limit, sort, fields, from, to, format });
+  const params = cleanParams({
+    q, page, limit, sort, fields, from, to,
+    ...(status ? { status } : {}),
+    ...(verified !== undefined ? { verified } : {}),
+    ...(hidden !== undefined ? { hidden } : {}),
+    ...(format ? { format } : {}),
+  });
 
-  // CSV export
+  /* ---------- CSV export ---------- */
   if (format === "csv") {
     const res = await request(
       { url: "/admin/businesses", method: "GET", params, responseType: "blob", signal },
@@ -162,9 +185,48 @@ export async function listBusinesses(opts = {}) {
     return { success: true, downloaded: true, filename: name };
   }
 
-  // JSON list
-  const res = await request({ url: "/admin/businesses", method: "GET", params, signal }, { retry });
-  return normalizeList(res.data, []);
+  /* ---------- JSON (tek sayfa veya tüm sayfalar) ---------- */
+  const fetchModeAll = all || mode === "all";
+  if (!fetchModeAll) {
+    const res = await request({ url: "/admin/businesses", method: "GET", params, signal }, { retry });
+    return normalizeList(res.data, []);
+  }
+
+  // → Tüm sayfaları topla
+  let curPage = Number(params.page) || 1;
+  const perPage = Number(params.limit) || 200;
+  const acc = [];
+  let total = 0, pages = 1, firstLimit;
+
+  for (let i = 0; i < maxPages; i++) {
+    const res = await request(
+      { url: "/admin/businesses", method: "GET", params: { ...params, page: curPage }, signal },
+      { retry }
+    );
+    const norm = normalizeList(res.data, []);
+    if (i === 0) {
+      total = norm.total || 0;
+      pages = norm.pages || 1;
+      firstLimit = norm.limit || perPage;
+    }
+    if (Array.isArray(norm.items) && norm.items.length) {
+      acc.push(...norm.items);
+    }
+    // bitecek koşullar
+    if (!norm.items?.length || curPage >= pages || acc.length >= total) break;
+    // son sayfadaysa kır
+    if (norm.items.length < (norm.limit || firstLimit || perPage)) break;
+    curPage += 1;
+  }
+
+  return {
+    success: true,
+    items: acc,
+    total: total || acc.length,
+    page: 1,
+    pages,
+    limit: firstLimit || perPage,
+  };
 }
 
 /* ============================== Requests ============================ */
@@ -274,6 +336,11 @@ export async function bulkSetRequestStatus(ids = [], status = "approved", reject
   return data; // { success, matched, modified }
 }
 
+/* ------------------------- Convenience exports -------------------- */
+export async function listBusinessesAll(opts = {}) {
+  return listBusinesses({ ...opts, all: true });
+}
+
 /* ------------------------- Default export -------------------------- */
 export default {
   api,
@@ -281,6 +348,7 @@ export default {
   setAdminToken,
   clearAdminToken,
   listBusinesses,
+  listBusinessesAll,
   listRequests,
   approveRequest,
   rejectRequest,
