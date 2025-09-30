@@ -1,0 +1,170 @@
+/* frontend/src/index.css */
+
+/* ==========================================================================
+   1. TEMEL AYARLAR VE DEĞİŞKENLER (Tüm Proje İçin)
+   ========================================================================== */
+:root {
+  --bg-color: #f8fafc;
+  --card-bg: #ffffff;
+  --text-color: #0f172a;
+  --text-muted: #64748b;
+  --border-color: #e2e8f0;
+  --brand-blue: #2563eb;
+  --verified-green: #16a34a;
+  --warning-red: #dc2626;
+  --star-yellow: #f59e0b;
+  --header-height: 65px; /* Üst menü yüksekliği */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--bg-color);
+  color: var(--text-color);
+  font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==========================================================================
+   2. GENEL YARDIMCI SINIFLAR (Tüm Sayfalarda Kullanılabilir)
+   ========================================================================== */
+.container {
+  width: min(1140px, 94vw);
+  margin-left: auto;
+  margin-right: auto;
+  padding-top: 2rem;
+  padding-bottom: 5rem;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 1.5rem;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+}
+
+.btn {
+  display: inline-block;
+  padding: 10px 20px;
+  border-radius: 12px;
+  border: none;
+  font-weight: bold;
+  cursor: pointer;
+  text-decoration: none;
+  text-align: center;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.1);
+}
+
+.btn-primary {
+  background-color: var(--brand-blue);
+  color: white;
+}
+
+.btn-danger {
+  background-color: var(--warning-red);
+  color: white;
+}
+
+/* ==========================================================================
+   3. MOBİL UYUM KODLARI (Ekran Küçüldüğünde Devreye Girer)
+   ========================================================================== */
+
+/* -------------------- TABLET GÖRÜNÜMÜ (992px ve altı) -------------------- */
+@media (max-width: 992px) {
+  /* İşletme Profili: Sol ve Sağ sütunlar alt alta gelsin */
+  .profile-grid {
+    grid-template-columns: 1fr;
+  }
+  .profile-sidebar {
+    position: static; /* Yapışkan özelliği iptal et */
+    margin-top: 2rem;
+  }
+
+  /* Dashboard: İstatistik kartları 2x2 olsun */
+  .dashboard-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+
+/* -------------------- TELEFON GÖRÜNÜMÜ (768px ve altı) -------------------- */
+@media (max-width: 768px) {
+  body {
+    font-size: 14px; /* Telefonlarda genel yazı boyutunu biraz küçült */
+  }
+
+  h1 { font-size: 1.8rem; }
+  h2 { font-size: 1.5rem; }
+
+  .container {
+    padding-top: 1rem;
+    padding-bottom: 4rem;
+  }
+
+  .card {
+    padding: 1rem;
+  }
+  
+  /* Search.jsx (Ana Sayfa) için mobil stiller */
+  .search-page-logo {
+    max-width: 80vw;
+  }
+  .search-bar-wrapper {
+    flex-direction: column;
+    gap: 0.75rem;
+    padding: 1rem;
+    border-radius: 24px;
+  }
+  .search-input {
+    width: 100%;
+    text-align: center;
+    font-size: 1rem;
+  }
+  .search-page-footer {
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  /* SapancaBungalov.jsx (Sonuç Listesi) için mobil stiller */
+  .sponsored-card {
+    flex: 0 0 180px; /* Sponsorlu kartları biraz küçült */
+  }
+  .results-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1rem;
+  }
+
+  /* BlacklistProfile.jsx (Kara Liste Profili) için mobil stiller */
+  .profile-header .business-name {
+    font-size: 1.8rem;
+  }
+  .stats-box {
+    flex-direction: column;
+    align-items: center;
+    gap: 1rem;
+  }
+  
+  /* Dashboard.jsx (Admin Paneli) için mobil stiller */
+  .dashboard-header, .dashboard-tabs {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.75rem;
+  }
+  .dashboard-stats-grid {
+    grid-template-columns: 1fr; /* İstatistik kartları alt alta gelsin */
+  }
+  .dashboard-table-wrapper {
+    overflow-x: auto; /* Tabloların taşmasını engelle, yana kaydırılabilir yap */
+  }
+}

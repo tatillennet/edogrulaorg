@@ -1,12 +1,17 @@
 // frontend/src/pages/Results.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-/** ------- küçük yardımcılar ------- **/
+/* ================== URL & API helpers ================== */
+const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
+const apiPath = (p) => `${API_BASE}${p.startsWith("/") ? p : `/${p}`}`;
+
+/* ================== küçük yardımcılar ================== */
 const useQP = (k, def = "") => {
   const loc = useLocation();
   return new URLSearchParams(loc.search).get(k) || def;
 };
+
 const toDisplayHost = (url) => {
   try {
     const u = new URL(url.startsWith("http") ? url : `https://${url}`);
@@ -15,7 +20,7 @@ const toDisplayHost = (url) => {
     return url;
   }
 };
-// kısa açıklama
+
 const truncate = (s = "", n = 160) => {
   const txt = String(s || "").replace(/\s+/g, " ").trim();
   if (txt.length <= n) return txt;
@@ -38,7 +43,7 @@ const Stars = ({ v = 0 }) => {
   );
 };
 
-/** ------- MOCK veri (fallback) ------- **/
+/* ================== MOCK veri (fallback) ================== */
 function mockData(query) {
   const q = (query || "").toLowerCase();
 
@@ -124,44 +129,57 @@ function mockData(query) {
   };
 }
 
-/** ------- (opsiyonel) API fetch + mock fallback ------- **/
-async function getResults(query, tab) {
-  try {
-    const base = import.meta.env.VITE_API_URL;
-    if (base) {
-      const r = await fetch(
-        `${base}/api/explore?q=${encodeURIComponent(query)}&tab=${encodeURIComponent(
-          tab || "all"
-        )}`,
-        { headers: { "x-edogrula-client": "web" } }
-      );
-      if (r.ok) {
-        const data = await r.json();
-        if (data && (data.results || data.places)) return data;
-      }
-    }
-  } catch {}
-  return mockData(query);
+/* ================== API fetch + mock fallback ================== */
+async function fetchExplore(query, tab, signal) {
+  const q = String(query || "").trim();
+  const t = String(tab || "all");
+  const url = apiPath(`/api/explore?q=${encodeURIComponent(q)}&tab=${encodeURIComponent(t)}`);
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json", "x-edogrula-client": "web" },
+    signal,
+    credentials: "include",
+  });
+  if (!res.ok) throw new Error(`explore ${res.status}`);
+  const data = await res.json();
+  if (!data || (!data.results && !data.places)) throw new Error("invalid payload");
+  return data;
 }
 
-/** ------- Sayfa ------- **/
+/* ================== Sayfa ================== */
 export default function Results() {
   const navigate = useNavigate();
   const q = useQP("q");
   const tab = useQP("tab", "all"); // all | images | videos | news
+
   const [data, setData] = useState(() => mockData(q));
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const controllerRef = useRef(null);
+
+  const load = useCallback(async () => {
+    controllerRef.current?.abort();
+    const ac = new AbortController();
+    controllerRef.current = ac;
+    setLoading(true);
+    setError("");
+    try {
+      const d = await fetchExplore(q, tab, ac.signal);
+      setData(d);
+    } catch (_) {
+      // düşse bile mock ile devam
+      setData(mockData(q));
+      setError("Sonuçlar güncellenemedi. Önbellek/veri simülasyonu gösteriliyor.");
+    } finally {
+      setLoading(false);
+    }
+  }, [q, tab]);
 
   useEffect(() => {
-    let alive = true;
-    (async () => {
-      setLoading(true);
-      const d = await getResults(q, tab);
-      if (alive) setData(d);
-      setLoading(false);
-    })();
-    return () => (alive = false);
-  }, [q, tab]);
+    load();
+    return () => controllerRef.current?.abort();
+  }, [load]);
 
   const inputRef = useRef(null);
   const submit = (val) => {
@@ -180,10 +198,16 @@ export default function Results() {
   );
   const gotoTab = (k) => navigate(`/ara?q=${encodeURIComponent(q)}&tab=${k}`);
 
-  // SPA içi/ dışı link yönlendirme (yerel ise aynı sekme)
+  // SPA içi/dışı link yönlendirme (aynı origin tam URL’leri de tek sekmede aç)
   const open = (e, url) => {
     if (!url) return;
-    const isLocal = url.startsWith("/");
+    let isLocal = url.startsWith("/");
+    if (!isLocal) {
+      try {
+        const u = new URL(url);
+        isLocal = u.origin === window.location.origin;
+      } catch {}
+    }
     if (isLocal) {
       e.preventDefault();
       navigate(url);
@@ -196,7 +220,7 @@ export default function Results() {
 
       {/* üst çubuk */}
       <header style={st.topbar}>
-        <div style={st.brand} onClick={() => navigate("/")}>
+        <div style={st.brand} onClick={() => navigate("/")} role="button" tabIndex={0}>
           <img src="/logo.png" alt="E-Doğrula" style={{ height: 30 }} />
         </div>
         <div style={st.search}>
@@ -209,7 +233,7 @@ export default function Results() {
             aria-label="Arama"
           />
           {!!q && (
-            <button className="gbtn" onClick={() => submit("")} title="Temizle">
+            <button className="gbtn" onClick={() => submit("")} title="Temizle" aria-label="Temizle">
               ✕
             </button>
           )}
@@ -218,32 +242,40 @@ export default function Results() {
           </button>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button className="gbtn" onClick={() => navigate("/apply")} title="İşletmeni doğrula">
+          <button className="gbtn" onClick={() => navigate("/apply")} title="İşletmeni doğrula" aria-label="İşletmeni doğrula">
             🛡️
           </button>
-          <button className="gbtn" onClick={() => navigate("/report")} title="Şikayet et">
+          <button className="gbtn" onClick={() => navigate("/report")} title="Şikayet et" aria-label="Şikayet et">
             🚩
           </button>
         </div>
       </header>
 
       {/* sekmeler */}
-      <nav style={st.tabs}>
+      <nav style={st.tabs} aria-label="Sonuç kategorileri">
         {tabs.map((t) => (
           <button
             key={t.key}
             onClick={() => gotoTab(t.key)}
             className={`tab ${tab === t.key ? "active" : ""}`}
+            aria-current={tab === t.key ? "page" : undefined}
           >
             {t.label}
           </button>
         ))}
       </nav>
 
-      {/* SADE DÜZEN: tek sütun */}
+      {/* gövde */}
       <div style={st.body}>
         <main style={st.main}>
-          {loading && <div className="loading">Yükleniyor…</div>}
+          {loading && (
+            <div className="loading">
+              <div className="skeleton-row" />
+              <div className="skeleton-row" />
+              <div className="skeleton-row" />
+            </div>
+          )}
+          {!loading && error && <div className="warn">{error}</div>}
 
           {/* Konaklama kart şeridi */}
           {data.vertical === "lodging" && data.places?.length > 0 && (
@@ -262,7 +294,7 @@ export default function Results() {
                   >
                     <div className="placeImg">
                       {/* eslint-disable-next-line */}
-                      <img src={p.image} alt="" />
+                      <img src={p.image} alt="" loading="lazy" />
                     </div>
                     <div className="placeTitle">{p.name}</div>
                     <div className="placeMeta">
@@ -285,12 +317,7 @@ export default function Results() {
           <section className="serp">
             {data.results?.map((r, i) => (
               <article key={i} className="serpItem">
-                <a
-                  className="title"
-                  href={r.url}
-                  onClick={(e) => open(e, r.url)}
-                  title={r.title}
-                >
+                <a className="title" href={r.url} onClick={(e) => open(e, r.url)} title={r.title}>
                   {r.title}
                 </a>
                 <div className="url">{toDisplayHost(r.url)}</div>
@@ -322,7 +349,7 @@ export default function Results() {
   );
 }
 
-/** ------- stiller ------- **/
+/* ================== stiller ================== */
 const st = {
   page: {
     minHeight: "100vh",
@@ -363,7 +390,6 @@ const st = {
     padding: "8px 16px",
     borderBottom: "1px solid #eef2f7",
   },
-  // SADE: tek sütun
   body: {
     display: "grid",
     gridTemplateColumns: "1fr",
@@ -381,10 +407,14 @@ const css = `
 .tab{background:#fff;border:1px solid #e5e7eb;border-radius:999px;padding:8px 12px;font-weight:700;cursor:pointer}
 .tab.active{background:#0f172a;color:#fff;border-color:#0f172a}
 .loading{padding:12px;font-weight:700}
+.warn{padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;color:#92400e;border-radius:12px;margin:10px 0}
+
+.skeleton-row{height:18px;border-radius:8px;background:linear-gradient(90deg,#f1f5f9,#e2e8f0,#f1f5f9);background-size:200% 100%;animation:sh 1.2s infinite; margin:10px 2px}
+@keyframes sh{0%{background-position:0 0}100%{background-position:-200% 0}}
 
 .placesHead{font-weight:800;margin:6px 0 10px 2px}
 .placesRow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.placeCard{display:flex;flex-direction:column;gap:6px;text-decoration:none;border:1px solid #eef2f7;border-radius:14px;overflow:hidden;background:#fff}
+.placeCard{display:flex;flex-direction:column;gap:6px;text-decoration:none;border:1px solid #eef2f7;border-radius:14px;overflow:hidden;background:#fff;transition:.15s ease}
 .placeCard:hover{box-shadow:0 10px 30px rgba(0,0,0,.06);transform:translateY(-1px)}
 .placeImg{aspect-ratio:4/3;overflow:hidden;background:#f3f4f6}
 .placeImg img{width:100%;height:100%;object-fit:cover}

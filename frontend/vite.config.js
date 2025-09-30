@@ -3,41 +3,62 @@ import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { fileURLToPath, URL } from "node:url";
 
-/** Basit hedef normalizasyonu (":5000", "localhost:5000", "http://..." hepsini toparlar) */
+/**
+ * Hedef normalizasyonu
+ * - ":5000"             → "http://localhost:5000"
+ * - "localhost:5000"    → "http://localhost:5000"
+ * - "https://api.foo"   → "https://api.foo"
+ * - "" (boş)            → "http://localhost:5000"
+ * - ".../api" ile bitiyorsa → sonundaki "/api" kaldır (proxy'de çift /api olmasın)
+ */
 function normalizeTarget(raw) {
   const RAW = String(raw || "").trim();
-  if (!RAW) return "http://localhost:5000";
-  if (/^https?:\/\//i.test(RAW)) return RAW.replace(/\/+$/, "");
-  if (/^:\d+$/.test(RAW)) return `http://localhost:${RAW.slice(1)}`; // ":5000"
-  return `http://${RAW}`.replace(/\/+$/, ""); // "localhost:5000" → "http://localhost:5000"
+  let t;
+  if (!RAW) t = "http://localhost:5000";
+  else if (/^https?:\/\//i.test(RAW)) t = RAW;
+  else if (/^:\d+$/.test(RAW)) t = `http://localhost:${RAW.slice(1)}`;
+  else t = `http://${RAW}`;
+
+  t = t.replace(/\/+$/, "");    // sondaki slashları at
+  t = t.replace(/\/api$/i, ""); // sonda /api varsa kaldır
+  return t;
 }
 
 export default ({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = normalizeTarget(env.VITE_API_URL);
+  // .env: VITE_API_URL = https://api.edogrula.org  (veya :5000 / localhost:5000 / https://api.../api)
+  const targetOrigin = normalizeTarget(env.VITE_API_URL);
 
   /** Ortak proxy ayarları */
   const proxyCommon = {
-    target,
+    target: targetOrigin, // örn: http://localhost:5000 | https://api.edogrula.org
     changeOrigin: true,
-    secure: false,          // self-signed/HTTP arka uçlar için
-    followRedirects: true,
-    ws: true,               // gerekirse WebSocket
+    secure: false,        // self-signed veya HTTP backend için
+    ws: true,
   };
 
   const proxy = {
+    // Tüm backend API
     "/api": proxyCommon,
+
+    // (İsteğe bağlı) img proxy’sini açıkça tanımlamak istersen:
+    "/api/img": proxyCommon,
+
+    // Statik upload'lar
     "/uploads": {
       ...proxyCommon,
-      // KÖTÜ YOLLARI DÜZELT:
+      // Bozuk path’leri düzelt:
       //  - ters slashları / yap
-      //  - /uploads/https://uploads/... → /uploads/...
+      //  - /uploads/http(s)://uploads/... → /uploads/...
       rewrite: (p) =>
         p
           .replace(/\\+/g, "/")
-          .replace(/^\/uploads\/https?:\/\/uploads\//i, "/uploads/"),
+          .replace(/^\/uploads\/https?:\/+uploads\//i, "/uploads/"),
     },
   };
+
+  // Bilgi amaçlı (konsolda gör)
+  console.log(`[vite] proxy target = ${targetOrigin}`);
 
   return defineConfig({
     plugins: [react()],
@@ -52,16 +73,19 @@ export default ({ mode }) => {
       strictPort: true,
       proxy,
       headers: {
-        // img yüklemelerinde CORP uyarılarını önlemek için
         "Cross-Origin-Resource-Policy": "cross-origin",
       },
     },
-    // Not: Vite 5'te preview.proxy desteklenir; Vite <5 ise bu blok yok sayılabilir.
+    // Vite 5'te preview.proxy desteklenir; dev ile port çakışmasın diye 4173
     preview: {
       host: true,
-      port: 5173,
+      port: 4173,
       strictPort: true,
       proxy,
+      headers: {
+        "Cross-Origin-Resource-Policy": "cross-origin",
+      },
     },
+    // build: { sourcemap: true }, // istersen aç
   });
 };
