@@ -1,4 +1,8 @@
 // src/main.jsx
+import "./api/axios-boot"; // 🔧 GLOBAL: axios'u /api tekrarını önleyecek şekilde patch'ler
+import "./api/axios-boot.js";
+import "./index.css"; // ✅ Proje genel stilleri
+
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
@@ -16,51 +20,39 @@ import Apply from "./pages/Apply";
 import Report from "./pages/Report";
 import BusinessProfile from "./pages/BusinessProfile";
 import VerifyEmail from "./pages/VerifyEmail";
-import Results from "./pages/Results"; // ✅ /ara & /search burada
+import Results from "./pages/Results";
+import SapancaBungalov from "./pages/SapancaBungalov";
+import BlacklistProfile from "./pages/BlacklistProfile"; // ✅ 1. YENİ SAYFA İÇERİ AKTARILDI
 
-/* ===================== URL Normalization ===================== */
+/* ===================== URL Normalization (assets only) ===================== */
 
-/** "uploads/..", "//uploads/.." gibi göreli/hatalı yolları → "/uploads/.." yapar */
 function normalizeAssetPath(p) {
   if (!p) return p;
-  let s = String(p).trim();
+  const s0 = String(p).trim();
 
-  // 1) Mutlak URL ise (http/https) ASLA dokunma
-  if (/^https?:\/\//i.test(s)) {
-    return s;
-  }
-  // 2) Kökten başlayan yol ise gereksiz çift slash'ı normalize et
-  if (s.startsWith("/")) {
-    return s.replace(/\/{2,}/g, "/");
-  }
+  // Mutlak URL ise dokunma
+  if (/^(https?:)?\/\//i.test(s0) || /^(data|blob):/i.test(s0)) return s0;
 
-  // 3) "//uploads/..." → "/uploads/..."
-  if (/^\/\/uploads\//i.test(s)) return s.replace(/^\/\//, "/");
+  let s = s0;
+  if (s.startsWith("/")) return s.replace(/\/{2,}/g, "/"); // gereksiz //
 
-  // 4) "uploads/..." → "/uploads/..."
-  if (/^uploads\//i.test(s)) return "/" + s;
+  if (/^\/\/uploads\//i.test(s)) return s.replace(/^\/\//, "/"); // //uploads -> /uploads
+  if (/^uploads\//i.test(s)) return "/" + s.replace(/^\/+/, ""); // uploads/... -> /uploads/...
 
-  // 5) Salt dosya adı veya göreli yol → /uploads/ altına sabitle
-  return ("/uploads/" + s).replace(/\/{2,}/g, "/");
+  return s0; // göreli linkleri bozma
 }
 
-/** style.backgroundImage içindeki url("...") kısmını da normalize eder */
 function normalizeBackgroundImage(el) {
   if (!el || !el.style) return;
   const bg = el.style.backgroundImage || "";
-  if (!bg || !/url\((.*?)\)/i.test(bg)) return;
-
+  if (!bg) return;
   const m = bg.match(/url\((['"]?)(.+?)\1\)/i);
   if (!m) return;
-
   const orig = m[2];
   const fixed = normalizeAssetPath(orig);
-  if (fixed && fixed !== orig) {
-    el.style.backgroundImage = `url(${fixed})`;
-  }
+  if (fixed && fixed !== orig) el.style.backgroundImage = `url(${fixed})`;
 }
 
-/** Tek bir element ve altındaki img/a/style(background) alanlarını düzelt */
 function normalizeElementAndDescendants(root) {
   if (!root || !(root instanceof Element)) return;
 
@@ -68,12 +60,6 @@ function normalizeElementAndDescendants(root) {
     const orig = root.getAttribute("src");
     const fixed = normalizeAssetPath(orig);
     if (fixed && fixed !== orig) root.setAttribute("src", fixed);
-  }
-
-  if (root.tagName === "A") {
-    const orig = root.getAttribute("href");
-    const fixed = normalizeAssetPath(orig);
-    if (fixed && fixed !== orig) root.setAttribute("href", fixed);
   }
 
   normalizeBackgroundImage(root);
@@ -84,18 +70,11 @@ function normalizeElementAndDescendants(root) {
     if (f && f !== o) img.setAttribute("src", f);
   });
 
-  root.querySelectorAll("a[href]").forEach((a) => {
-    const o = a.getAttribute("href");
-    const f = normalizeAssetPath(o);
-    if (f && f !== o) a.setAttribute("href", f);
-  });
-
   root.querySelectorAll("[style*='background']").forEach((el) =>
     normalizeBackgroundImage(el)
   );
 }
 
-/** DOM’u canlı izleyip (slider gibi) sonradan eklenenleri de düzeltir */
 function useLiveAssetFix() {
   React.useEffect(() => {
     requestAnimationFrame(() => normalizeElementAndDescendants(document.body));
@@ -108,18 +87,12 @@ function useLiveAssetFix() {
             const o = el.getAttribute("src");
             const f = normalizeAssetPath(o);
             if (f && f !== o) el.setAttribute("src", f);
-          } else if (m.attributeName === "href" && el.tagName === "A") {
-            const o = el.getAttribute("href");
-            const f = normalizeAssetPath(o);
-            if (f && f !== o) el.setAttribute("href", f);
           } else if (m.attributeName === "style") {
             normalizeBackgroundImage(el);
           }
         } else if (m.type === "childList") {
           m.addedNodes.forEach((node) => {
-            if (node.nodeType === 1) {
-              normalizeElementAndDescendants(node);
-            }
+            if (node.nodeType === 1) normalizeElementAndDescendants(node);
           });
         }
       }
@@ -129,7 +102,7 @@ function useLiveAssetFix() {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["src", "href", "style"],
+      attributeFilter: ["src", "style"], // href'i izleme (linkleri bozmasın)
     });
 
     return () => obs.disconnect();
@@ -141,13 +114,13 @@ function useLiveAssetFix() {
 function ScrollToTop() {
   const { pathname } = useLocation();
   React.useEffect(() => {
-    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   }, [pathname]);
   return null;
 }
 
 function RootLayout() {
-  useLiveAssetFix(); // 🔧 kritik: tüm görseller canlı düzeltilir
+  useLiveAssetFix();
   return (
     <>
       <ScrollToTop />
@@ -162,11 +135,13 @@ function NotFound() {
       style={{
         textAlign: "center",
         marginTop: "20%",
-        fontFamily: "Segoe UI, sans-serif",
+        fontFamily: "Segoe UI, system-ui, -apple-system, Arial, sans-serif",
       }}
+      role="alert"
+      aria-live="assertive"
     >
-      <h2 style={{ color: "#c0392b" }}>404 - Sayfa Bulunamadı</h2>
-      <p>Aradığınız sayfa mevcut değil.</p>
+      <h2 style={{ color: "#c0392b", marginBottom: 8 }}>404 - Sayfa Bulunamadı</h2>
+      <p style={{ margin: "4px 0 16px" }}>Aradığınız sayfa mevcut değil.</p>
       <Link to="/" style={{ color: "#2980b9", fontWeight: 600 }}>
         Ana Sayfaya Dön
       </Link>
@@ -184,13 +159,21 @@ const router = createBrowserRouter(
         { path: "apply", element: <Apply /> },
         { path: "report", element: <Report /> },
 
-        // ✅ /ara ve /search Results.jsx’i render ediyor
+        // /ara ve /search aynı sayfa
         { path: "ara", element: <Results /> },
         { path: "search", element: <Results /> },
+
+        // Sapanca bungalov listesi (Google tarzı)
+        { path: "sapanca-bungalov-evleri", element: <SapancaBungalov /> },
+
+        // ✅ 2. YENİ ROUTE DOĞRU YERE EKLENDİ
+        { path: "kara-liste/:slug", element: <BlacklistProfile /> },
 
         { path: "business/:slug", element: <BusinessProfile /> },
         { path: "isletme/:slug", element: <BusinessProfile /> },
         { path: "b/:slug", element: <BusinessProfile /> },
+
+        // dikkat: spesifik rotalardan sonra, en sonda kalsın
         { path: ":slug", element: <BusinessProfile /> },
 
         { path: "verify-email", element: <VerifyEmail /> },
@@ -203,18 +186,18 @@ const router = createBrowserRouter(
       ],
     },
   ],
-  {
-    future: { v7_startTransition: true, v7_relativeSplatPath: true },
-  }
+  { future: { v7_startTransition: true, v7_relativeSplatPath: true } }
 );
 
 /* ===================== Mount ===================== */
 
-ReactDOM.createRoot(document.getElementById("root")).render(
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(
   <React.StrictMode>
     <RouterProvider
       router={router}
       future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+      fallbackElement={<div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>}
     />
   </React.StrictMode>
 );

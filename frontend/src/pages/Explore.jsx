@@ -3,87 +3,342 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 /* ---------------- helpers ---------------- */
-function useQP(name){ const {search}=useLocation(); return useMemo(()=>new URLSearchParams(search).get(name)||"",[search,name]); }
-function getDomain(u){ try{ return new URL(u).hostname.replace(/^www\./,""); }catch{ return ""; } }
-function getFavicon(u){ const d=getDomain(u); return d?`https://www.google.com/s2/favicons?domain=${encodeURIComponent(d)}&sz=64`:""; }
+function useQP(name, def = "") {
+  const { search } = useLocation();
+  return useMemo(() => new URLSearchParams(search).get(name) || def, [search, name]);
+}
+function getDomain(u) {
+  try {
+    return new URL(u.startsWith("http") ? u : `https://${u}`).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+function getFavicon(u) {
+  const d = getDomain(u);
+  return d ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(d)}&sz=64` : "";
+}
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+const api = (p) => `${API_BASE}${p.startsWith("/") ? p : `/${p}`}`;
 
-/* ---- TEMP: sonuçları kapalı tut ----
-   Backend hazır olduğunda burayı gerçek API çağrısıyla değiştirin. */
-async function fetchResultsDisabled(/* query, tab */){
-  return { type: "web", related: [], items: [] };
+/** Basit mock (API dönmezse) */
+function mockData(query, tab) {
+  if (/sapanca|bungalov/i.test(query) && (tab === "all" || tab === "images")) {
+    return {
+      type: tab === "images" ? "images" : "web",
+      related: ["sapanca bungalov", "kartepe bungalov", "kocaeli bungalov"],
+      items:
+        tab === "images"
+          ? Array.from({ length: 12 }).map((_, i) => ({
+              type: "image",
+              src: `https://images.unsplash.com/photo-150569${(i + 1000)
+                .toString()
+                .slice(-4)}?q=80&w=800&auto=format&fit=crop`,
+              alt: "Bungalov",
+              pageUrl: "/isletme/sapanca-bungalov",
+            }))
+          : [
+              {
+                type: "web",
+                title: "Sapanca Konaklama Rehberi",
+                url: "/isletme/sapanca-konaklama-rehberi",
+                snippet:
+                  "Sapanca bungalovları 2025 fiyatları, konum ve imkanlar. En uygun fiyatlarla hemen rezervasyon yapın.",
+                breadcrumbs: ["edogrula.org"],
+              },
+            ],
+    };
+  }
+  return { type: "web", related: ["instagram doğrulama", "telefon sorgu"], items: [] };
 }
 
 /* ---------------- page ---------------- */
-export default function Explore(){
+export default function Explore() {
   const navigate = useNavigate();
-  const qParam    = useQP("q");
 
-  const [query, setQuery]     = useState(qParam);
-  const [tab, setTab]         = useState("all");
-  const [results, setResults] = useState({ type:"web", related:[], items:[] });
+  const qParam = useQP("q", "");
+  const tabParam = useQP("tab", "all"); // all | images | videos | news
+
+  const [query, setQuery] = useState(qParam);
+  const [tab, setTab] = useState(tabParam);
+  const [results, setResults] = useState({ type: "web", related: [], items: [] });
   const [loading, setLoading] = useState(false);
-  const [shadow, setShadow]   = useState(false);
+  const [shadow, setShadow] = useState(false);
+  const [offline, setOffline] = useState(!navigator.onLine);
+  const [error, setError] = useState("");
   const inputRef = useRef(null);
+  const ctrlRef = useRef(null);
 
-  useEffect(()=> setQuery(qParam), [qParam]);
-  useEffect(()=>{
-    const on = () => setShadow(window.scrollY>4);
-    on(); window.addEventListener("scroll", on);
-    return () => window.removeEventListener("scroll", on);
+  // sabit öneriler
+  const suggestions = useMemo(
+    () => [
+      "sapanca bungalov evleri",
+      "kartepe bungalov evleri",
+      "kocaeli bungalov evleri",
+      "@kulesapanca",
+      "kule-sapanca.com",
+      "dolandırıcı işletme ihbarı",
+    ],
+    []
+  );
+
+  useEffect(() => setQuery(qParam), [qParam]);
+  useEffect(() => setTab(tabParam), [tabParam]);
+
+  useEffect(() => {
+    const onScroll = () => setShadow(window.scrollY > 4);
+    const onOnline = () => setOffline(false);
+    const onOffline = () => setOffline(true);
+    onScroll();
+    window.addEventListener("scroll", onScroll);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
   }, []);
 
-  useEffect(()=>{ run(qParam, tab); /* eslint-disable-next-line */}, [qParam, tab]);
+  useEffect(() => {
+    run(qParam, tabParam); // q ve tab URL'den okunuyor
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [qParam, tabParam]);
 
-  const run = async (q=qParam, t=tab) => {
+  const run = async (q = qParam, t = tabParam) => {
     setLoading(true);
-    const data = await fetchResultsDisabled(q, t==="all" ? "web" : t);
-    setResults(data);
-    setLoading(false);
+    setError("");
+    ctrlRef.current?.abort?.();
+    const ctrl = new AbortController();
+    ctrlRef.current = ctrl;
+
+    try {
+      // tab -> API tip eşleştirme
+      const type = t === "all" ? "web" : t; // backend "web|images|videos|news" beklerse
+      const r = await fetch(
+        api(`/api/explore?q=${encodeURIComponent(q)}&tab=${encodeURIComponent(type)}`),
+        { headers: { "x-edogrula-client": "web" }, signal: ctrl.signal }
+      );
+
+      if (!r.ok) {
+        // 204/404/5xx durumlarında mock’a düşün
+        const data = mockData(q, t);
+        setResults(data);
+        if (r.status >= 400) setError("Sonuçlar getirilemedi.");
+      } else {
+        const data = await r.json();
+        if (data && (Array.isArray(data.items) || Array.isArray(data.results))) {
+          // Esneklik: backend results/items isim farkı
+          const items = data.items || data.results || [];
+          setResults({
+            type: data.type || type || "web",
+            related: data.related || data.suggestions || [],
+            items,
+          });
+        } else {
+          setResults(mockData(q, t));
+        }
+      }
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setResults(mockData(q, t));
+      setError("Ağ hatası veya CORS engeli.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const submit = () => {
     const v = query.trim();
-    if(!v) return;
-    navigate(`/ara?q=${encodeURIComponent(v)}`);
+    if (!v) return;
+    navigate(`/ara?q=${encodeURIComponent(v)}&tab=${encodeURIComponent(tab)}`);
   };
-  const onKey = (e) => e.key==="Enter" && submit();
+  const onKey = (e) => e.key === "Enter" && submit();
+  const gotoTab = (k) => navigate(`/ara?q=${encodeURIComponent(query || qParam)}&tab=${encodeURIComponent(k)}`);
 
-  const suggestions = [
-    "sapanca bungalov evleri",
-    "kartepe bungalov evleri",
-    "kocaeli bungalov evleri",
-    "instagram doğrulama",
-    "otel yorumları güvenilir mi",
-    "işletme telefonu sorgula",
-  ];
+  // SPA içi/dışı link açma
+  const open = (e, url) => {
+    if (!url) return;
+    const isLocal = url.startsWith("/");
+    if (isLocal) {
+      e.preventDefault();
+      navigate(url);
+    }
+  };
+
+  // Bölüm render’ları
+  const renderWeb = (list = []) => (
+    <section className="serp">
+      {list.map((r, i) => (
+        <article key={i} className="serpItem">
+          <a className="title" href={r.url} onClick={(e) => open(e, r.url)} title={r.title}>
+            {r.title || r.name || getDomain(r.url)}
+          </a>
+          <div className="url">
+            {getFavicon(r.url) && <img src={getFavicon(r.url)} alt="" width={16} height={16} style={{ verticalAlign: "-2px", marginRight: 6 }} />}
+            {getDomain(r.url)}
+          </div>
+          {r.breadcrumbs && <div className="crumbs">{(r.breadcrumbs || []).join(" › ")}</div>}
+          {r.publishedAt && <div className="meta">{new Date(r.publishedAt).toLocaleDateString("tr-TR")}</div>}
+          {r.snippet && <p className="snippet">{String(r.snippet).trim()}</p>}
+        </article>
+      ))}
+      {!loading && list.length === 0 && (
+        <div className="empty">
+          <div className="h">Sonuç bulunamadı</div>
+          <div className="m">Farklı bir anahtar kelime deneyin.</div>
+          <button className="btn ghost" onClick={() => run()}>
+            Yenile
+          </button>
+        </div>
+      )}
+    </section>
+  );
+
+  const renderImages = (list = []) => (
+    <section className="imagesGrid">
+      {list.map((it, i) => (
+        <a
+          key={i}
+          className="imgCard"
+          href={it.pageUrl || it.url || it.src}
+          onClick={(e) => open(e, it.pageUrl || it.url || it.src)}
+          title={it.alt || it.title || "Görsel"}
+        >
+          {/* eslint-disable-next-line */}
+          <img src={it.src || it.url} alt={it.alt || ""} loading="lazy" decoding="async" />
+        </a>
+      ))}
+      {!loading && list.length === 0 && (
+        <div className="empty">
+          <div className="h">Görsel bulunamadı</div>
+          <div className="m">Daha spesifik bir arama deneyin.</div>
+        </div>
+      )}
+    </section>
+  );
+
+  const renderVideos = (list = []) => (
+    <section className="videoList">
+      {list.map((v, i) => (
+        <a
+          key={i}
+          className="videoRow"
+          href={v.url}
+          onClick={(e) => open(e, v.url)}
+          title={v.title}
+        >
+          <div className="thumb">
+            {/* eslint-disable-next-line */}
+            <img src={v.thumbnail} alt="" loading="lazy" decoding="async" />
+            {v.duration && <span className="dur">{v.duration}</span>}
+          </div>
+          <div className="vmeta">
+            <div className="vtitle">{v.title}</div>
+            <div className="vsite">
+              {getFavicon(v.url) && <img src={getFavicon(v.url)} alt="" width={14} height={14} style={{ verticalAlign: "-2px", marginRight: 6 }} />}
+              {getDomain(v.url)}
+            </div>
+            {v.publishedAt && <div className="vtime">{new Date(v.publishedAt).toLocaleDateString("tr-TR")}</div>}
+            {v.snippet && <div className="vsnip">{v.snippet}</div>}
+          </div>
+        </a>
+      ))}
+      {!loading && list.length === 0 && (
+        <div className="empty">
+          <div className="h">Video bulunamadı</div>
+        </div>
+      )}
+    </section>
+  );
+
+  const renderNews = (list = []) => (
+    <section className="newsList">
+      {list.map((n, i) => (
+        <a key={i} className="newsRow" href={n.url} onClick={(e) => open(e, n.url)} title={n.title}>
+          <div className="nleft">
+            <div className="ntitle">{n.title}</div>
+            <div className="nmeta">
+              {getDomain(n.url)}
+              {n.publishedAt ? ` • ${new Date(n.publishedAt).toLocaleString("tr-TR")}` : ""}
+            </div>
+            {n.snippet && <div className="nsnip">{n.snippet}</div>}
+          </div>
+          {n.image && (
+            <div className="nthumb">
+              {/* eslint-disable-next-line */}
+              <img src={n.image} alt="" loading="lazy" decoding="async" />
+            </div>
+          )}
+        </a>
+      ))}
+      {!loading && list.length === 0 && (
+        <div className="empty">
+          <div className="h">Haber bulunamadı</div>
+        </div>
+      )}
+    </section>
+  );
+
+  // aktif görünüm
+  const body = useMemo(() => {
+    const t = (results.type || tab).toLowerCase();
+    const items = results.items || [];
+    if (t === "images") return renderImages(items);
+    if (t === "videos") return renderVideos(items);
+    if (t === "news") return renderNews(items);
+    return renderWeb(items);
+  }, [results, tab, loading]);
 
   return (
     <div className="xp-page">
       <style>{css}</style>
 
       {/* header */}
-      <header className={`xp-header ${shadow?"withShadow":""}`}>
+      <header className={`xp-header ${shadow ? "withShadow" : ""}`}>
         <div className="xp-head-inner">
-          <a href="/" className="xp-logo" aria-label="E-Doğrula"><img src="/logo.png" alt="E-Doğrula" /></a>
+          <a href="/" className="xp-logo" aria-label="E-Doğrula">
+            {/* eslint-disable-next-line */}
+            <img src="/logo.png" alt="E-Doğrula" />
+          </a>
           <div className="xp-search">
             <input
               ref={inputRef}
               value={query}
-              onChange={e=>setQuery(e.target.value)}
+              onChange={(e) => setQuery(e.target.value)}
               onKeyDown={onKey}
               placeholder="Aramak için yazın…"
               aria-label="Arama"
             />
-            {query && <button className="icon ghost" onClick={()=>setQuery("")} aria-label="Temizle">✕</button>}
-            <button className="btn solid" onClick={submit}>Sorgula</button>
+            {query && (
+              <button className="icon ghost" onClick={() => setQuery("")} aria-label="Temizle">
+                ✕
+              </button>
+            )}
+            <button className="btn solid" onClick={submit}>
+              Sorgula
+            </button>
           </div>
           <nav className="xp-tabs">
-            <button className={`pill ${tab==="all"?"sel":""}`}     onClick={()=>setTab("all")}>Tümü</button>
-            <button className={`pill ${tab==="images"?"sel":""}`}  onClick={()=>setTab("images")}>Görseller</button>
-            <button className={`pill ${tab==="videos"?"sel":""}`}  onClick={()=>setTab("videos")}>Videolar</button>
-            <button className={`pill ${tab==="news"?"sel":""}`}    onClick={()=>setTab("news")}>Haberler</button>
+            <button className={`pill ${tab === "all" ? "sel" : ""}`} onClick={() => gotoTab("all")}>
+              Tümü
+            </button>
+            <button className={`pill ${tab === "images" ? "sel" : ""}`} onClick={() => gotoTab("images")}>
+              Görseller
+            </button>
+            <button className={`pill ${tab === "videos" ? "sel" : ""}`} onClick={() => gotoTab("videos")}>
+              Videolar
+            </button>
+            <button className={`pill ${tab === "news" ? "sel" : ""}`} onClick={() => gotoTab("news")}>
+              Haberler
+            </button>
           </nav>
         </div>
+        {offline && (
+          <div className="offline" role="status">
+            Çevrimdışısınız — sonuçlar güncellenemeyebilir.
+          </div>
+        )}
       </header>
 
       {/* layout: sol öneriler + sonuç alanı */}
@@ -92,22 +347,39 @@ export default function Explore(){
           <section className="card">
             <div className="card-head">Öneriler</div>
             <ul className="list">
-              {suggestions.map((s,i)=>(
+              {suggestions.map((s, i) => (
                 <li key={i}>
-                  <button className="row" onClick={()=>navigate(`/ara?q=${encodeURIComponent(s)}`)}>
-                    <span className="i">🔎</span><span>{s}</span>
+                  <button className="row" onClick={() => navigate(`/ara?q=${encodeURIComponent(s)}&tab=all`)}>
+                    <span className="i">🔎</span>
+                    <span>{s}</span>
                   </button>
                 </li>
               ))}
             </ul>
           </section>
+
+          {!!(results.related || []).length && (
+            <section className="card" style={{ marginTop: 12 }}>
+              <div className="card-head">İlgili aramalar</div>
+              <ul className="list">
+                {(results.related || []).slice(0, 10).map((s, i) => (
+                  <li key={`rel-${i}`}>
+                    <button className="row" onClick={() => navigate(`/ara?q=${encodeURIComponent(s)}&tab=${tab}`)}>
+                      <span className="i">↗</span>
+                      <span>{s}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
         </aside>
 
         <main className="xp-main">
           {/* loader */}
           {loading && (
             <div className="skeletons">
-              {[...Array(4)].map((_,i)=>(
+              {[...Array(4)].map((_, i) => (
                 <div key={i} className="sk-row">
                   <div className="sk-title shimmer" />
                   <div className="sk-meta shimmer" />
@@ -117,31 +389,41 @@ export default function Explore(){
             </div>
           )}
 
-          {/* boş durum */}
-          {!loading && results.items.length===0 && (
-            <div className="empty">
-              <div className="h">Şimdilik sonuç gösterilmiyor</div>
-              <div className="m">Backend bağlandığında bu alan otomatik dolacak.</div>
-              <button className="btn ghost" onClick={()=>run()}>Yenile</button>
+          {/* hata */}
+          {!loading && error && (
+            <div className="empty" style={{ color: "#b91c1c" }}>
+              <div className="h">Bir şeyler ters gitti</div>
+              <div className="m">{error}</div>
+              <button className="btn ghost" onClick={() => run()}>
+                Yenile
+              </button>
             </div>
           )}
 
-          {/* (Not: Sonuç listesi kasıtlı olarak kapalı) */}
+          {/* sonuçlar */}
+          {!loading && !error && body}
         </main>
       </div>
 
-      <button className="toTop" onClick={()=>window.scrollTo({top:0,behavior:"smooth"})} aria-label="Başa dön">↑</button>
+      <button
+        className="toTop"
+        onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+        aria-label="Başa dön"
+        title="Başa dön"
+      >
+        ↑
+      </button>
     </div>
   );
 }
 
-/* ---------------- styles (aynı) ---------------- */
+/* ---------------- styles ---------------- */
 const css = `
 :root{
   --bg: var(--bg, #ffffff);
   --card: var(--card, #ffffff);
   --fg: var(--fg, #0f172a);
-  --fg2: var(--fg-2, #24324a);
+  --fg-2: var(--fg-2, #24324a);
   --muted: var(--muted, #f1f5f9);
   --border: var(--border, #e5e7eb);
   --brand: var(--brand, #2d8cf0);
@@ -159,6 +441,7 @@ const css = `
 .xp-tabs{display:flex;gap:8px;align-items:center}
 .pill{background:var(--card);border:1px solid var(--border);border-radius:999px;padding:8px 12px;font-weight:800;cursor:pointer}
 .pill.sel{background:var(--brand);color:#fff;border-color:var(--brand)}
+.offline{max-width:1100px;margin:0 auto;padding:8px 14px 12px;color:#ad3b12;background:#fff7ed;border-top:1px solid #fed7aa}
 .xp-container.two{max-width:1100px;margin:14px auto;padding:0 12px;display:grid;gap:16px;grid-template-columns:260px minmax(0,1fr)}
 .rail .card{border:1px solid var(--border);background:var(--card);border-radius:14px;box-shadow:0 8px 24px rgba(0,0,0,.04);overflow:hidden}
 .card-head{padding:12px 14px;border-bottom:1px solid var(--border);font-weight:900}
@@ -167,21 +450,70 @@ const css = `
 .row{width:100%;display:flex;gap:10px;align-items:center;justify-content:flex-start;padding:10px 12px;background:transparent;border:0;text-align:left;cursor:pointer;color:var(--fg)}
 .row:hover{background:color-mix(in oklab, var(--muted) 60%, transparent)}
 .row .i{width:18px;text-align:center;opacity:.8}
+
+/* Serp */
+.serp{display:flex;flex-direction:column;gap:16px}
+.serpItem{padding:10px 4px;border-bottom:1px solid #f1f5f9}
+.serpItem .title{font-size:18px;font-weight:800;text-decoration:none;color:#0f172a}
+.serpItem .title:hover{text-decoration:underline}
+.serpItem .url{color:#16a34a;font-weight:700;margin-top:2px}
+.serpItem .crumbs{color:#64748b;font-size:12px;margin-top:2px}
+.serpItem .meta{color:#64748b;font-size:12px;margin-top:2px}
+.serpItem .snippet{color:#334155;margin-top:6px;line-height:1.6}
+
+/* Images */
+.imagesGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.imgCard{display:block;border-radius:12px;overflow:hidden;border:1px solid var(--border);background:#fff}
+.imgCard img{width:100%;height:100%;object-fit:cover;aspect-ratio:4/3}
+.imgCard:hover{transform:translateY(-1px);box-shadow:0 10px 30px rgba(0,0,0,.06)}
+
+/* Videos */
+.videoList{display:flex;flex-direction:column;gap:12px}
+.videoRow{display:grid;grid-template-columns:180px 1fr;gap:12px;text-decoration:none;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#fff;color:inherit}
+.videoRow:hover{box-shadow:0 10px 30px rgba(0,0,0,.06)}
+.videoRow .thumb{position:relative;background:#f3f4f6}
+.videoRow .thumb img{width:100%;height:100%;object-fit:cover;aspect-ratio:16/9}
+.videoRow .thumb .dur{position:absolute;right:6px;bottom:6px;background:rgba(0,0,0,.7);color:#fff;border-radius:6px;padding:2px 6px;font-size:12px}
+.vmeta{padding:8px 10px}
+.vtitle{font-weight:900;margin-bottom:4px}
+.vsite{color:#16a34a;font-weight:700}
+.vtime{color:#64748b;font-size:12px;margin-top:2px}
+.vsnip{color:#334155;margin-top:6px}
+
+/* News */
+.newsList{display:flex;flex-direction:column;gap:12px}
+.newsRow{display:grid;grid-template-columns:1fr 160px;gap:12px;text-decoration:none;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:#fff;color:inherit}
+.newsRow:hover{box-shadow:0 10px 30px rgba(0,0,0,.06)}
+.nthumb img{width:100%;height:100%;object-fit:cover;aspect-ratio:4/3}
+.ntitle{font-weight:900;margin-bottom:4px}
+.nmeta{color:#64748b;font-size:12px}
+.nsnip{color:#334155;margin-top:6px}
+
+/* Skeleton */
 .skeletons .sk-row{border:1px solid var(--border);background:var(--card);border-radius:14px;padding:14px;margin-bottom:10px}
 .shimmer{background:linear-gradient(90deg, rgba(0,0,0,.04), rgba(0,0,0,.08), rgba(0,0,0,.04));background-size:200% 100%;animation:sh 1.1s infinite linear;border-radius:8px}
 .sk-title{height:18px;width:60%;margin-bottom:8px}
 .sk-meta{height:12px;width:30%}
 .sk-snippet{height:42px;width:90%;margin-top:10px}
 @keyframes sh{0%{background-position:0 0}100%{background-position:200% 0}}
+
+/* Empty */
 .empty{display:grid;place-items:center;padding:48px 0;color:#475569}
 .empty .h{font-weight:900;margin-bottom:4px}
 .empty .m{margin-bottom:10px}
+
 .toTop{position:fixed;right:18px;bottom:18px;border:1px solid var(--border);background:var(--card);color:var(--fg);width:40px;height:40px;border-radius:50%;cursor:pointer;box-shadow:0 10px 24px rgba(0,0,0,.12)}
+
+@media (max-width:1200px){
+  .imagesGrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
 @media (max-width: 980px){
   .xp-head-inner{grid-template-columns:140px 1fr;grid-template-rows:auto auto}
   .xp-tabs{grid-column:1/3;justify-content:center}
   .xp-container.two{grid-template-columns:minmax(0,1fr);max-width:900px}
   .rail.left{order:2}
   .xp-main{order:1}
+  .videoRow{grid-template-columns:1fr}
+  .newsRow{grid-template-columns:1fr}
 }
 `;
