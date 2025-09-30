@@ -4,6 +4,22 @@ import axios from "axios";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import LightboxGallery from "@/components/LightboxGallery.jsx";
 
+/* ------------ küçük yardımcı: media query dinleyicisi ------------ */
+function useMedia(query) {
+  const get = () =>
+    typeof window !== "undefined" && window.matchMedia(query).matches;
+  const [matches, setMatches] = React.useState(get);
+  React.useEffect(() => {
+    const mq = window.matchMedia(query);
+    const on = (e) => setMatches(e.matches);
+    try { mq.addEventListener("change", on); } catch { mq.addListener(on); }
+    return () => {
+      try { mq.removeEventListener("change", on); } catch { mq.removeListener(on); }
+    };
+  }, [query]);
+  return matches;
+}
+
 /** Profil sayfası — Pro sürüm
  * - Tek axios instance + baseURL normalizasyonu
  * - İşletme fetch: çok uç + abort + sessionStorage cache
@@ -19,6 +35,7 @@ export default function BusinessProfile() {
   const { slug } = useParams();
   const navigate = useNavigate();
   const loc = useLocation();
+  const isMobile = useMedia("(max-width: 960px)");
 
   /* ---------------- HTTP instance ---------------- */
   const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
@@ -30,7 +47,10 @@ export default function BusinessProfile() {
     });
     inst.interceptors.request.use((cfg) => {
       // ziyaretçi sayfası; token opsiyonel
-      const t = localStorage.getItem("adminToken") || localStorage.getItem("token") || "";
+      const t =
+        localStorage.getItem("adminToken") ||
+        localStorage.getItem("token") ||
+        "";
       if (t) cfg.headers.Authorization = `Bearer ${t}`;
       return cfg;
     });
@@ -74,7 +94,9 @@ export default function BusinessProfile() {
         ];
         for (const path of candidates) {
           try {
-            const { data } = await http.get(path, { signal: ctrlRef.current.signal });
+            const { data } = await http.get(path, {
+              signal: ctrlRef.current.signal,
+            });
             const biz =
               data?.business ||
               data?.result ||
@@ -117,10 +139,14 @@ export default function BusinessProfile() {
     () => (Array.isArray(b?.phones) ? b.phones : b?.phone ? [b.phone] : []),
     [b]
   );
-  const instagram = b?.instagram || b?.instagramUsername || b?.handle || null;
-  const instagramUrl = b?.instagramUrl || (instagram ? `https://instagram.com/${trimAt(instagram)}` : null);
+  const instagram =
+    b?.instagram || b?.instagramUsername || b?.handle || null;
+  const instagramUrl =
+    b?.instagramUrl ||
+    (instagram ? `https://instagram.com/${trimAt(instagram)}` : null);
   const website = b?.website || b?.site || null;
-  const address = b?.address || b?.fullAddress || b?.location?.address || null;
+  const address =
+    b?.address || b?.fullAddress || b?.location?.address || null;
   const coords = {
     lat: b?.location?.lat ?? b?.lat,
     lng: b?.location?.lng ?? b?.lng,
@@ -128,10 +154,13 @@ export default function BusinessProfile() {
 
   // Görseller (absolute)
   const imagesAbs = useMemo(() => {
-    if (Array.isArray(b?.galleryAbs) && b.galleryAbs.length) return uniq(b.galleryAbs.filter(Boolean));
+    if (Array.isArray(b?.galleryAbs) && b.galleryAbs.length)
+      return uniq(b.galleryAbs.filter(Boolean));
     const base =
       API_BASE ||
-      (typeof window !== "undefined" ? window.location.origin.replace(/\/+$/, "") : "");
+      (typeof window !== "undefined"
+        ? window.location.origin.replace(/\/+$/, "")
+        : "");
     const out = new Set();
     const push = (v) => {
       if (!v) return;
@@ -141,7 +170,8 @@ export default function BusinessProfile() {
       if (!s) return;
       if (/^https?:\/\//i.test(s)) out.add(s);
       else if (s.startsWith("/uploads/")) out.add(base + s);
-      else if (/^uploads\//i.test(s)) out.add(`${base}/${s.replace(/^\/+/, "")}`);
+      else if (/^uploads\//i.test(s))
+        out.add(`${base}/${s.replace(/^\/+/, "")}`);
     };
     push(b?.photos);
     push(b?.images);
@@ -152,7 +182,6 @@ export default function BusinessProfile() {
   }, [b, API_BASE]);
 
   /* ---------------- rezervasyon paneli ---------------- */
-  // URL ile ön doldurma (?start=YYYY-MM-DD&end=YYYY-MM-DD&adults=2&children=1)
   const qs = new URLSearchParams(loc.search);
   const [range, setRange] = useState({
     start: qs.get("start") || "",
@@ -200,7 +229,9 @@ export default function BusinessProfile() {
             .map((age, i) => `${i + 1}. çocuk yaşı: ${age || "belirtilmedi"}`)
             .join("\n")}`
         : "") +
-      `\nRef: ${window.location.origin}/isletme/${encodeURIComponent(slug)}`;
+      `\nRef: ${window.location.origin}/isletme/${encodeURIComponent(
+        slug
+      )}`;
 
     const utm = `?utm_source=edogrula&utm_medium=profile&utm_campaign=wa_booking&biz=${encodeURIComponent(
       slug
@@ -219,8 +250,16 @@ export default function BusinessProfile() {
 
   /* ---------------- yorumlar + puanlama ---------------- */
   const [tab, setTab] = useState("google"); // google | site
-  const [gReviews, setGReviews] = useState({ rating: null, count: 0, reviews: [] });
-  const [sReviews, setSReviews] = useState({ rating: null, count: 0, reviews: [] });
+  const [gReviews, setGReviews] = useState({
+    rating: null,
+    count: 0,
+    reviews: [],
+  });
+  const [sReviews, setSReviews] = useState({
+    rating: null,
+    count: 0,
+    reviews: [],
+  });
   const [revLoading, setRevLoading] = useState(false);
   const [myRating, setMyRating] = useState(0);
   const [myComment, setMyComment] = useState("");
@@ -235,8 +274,12 @@ export default function BusinessProfile() {
         setRevLoading(true);
 
         const gUrls = [
-          b?.googlePlaceId ? `/api/google/reviews?placeId=${b.googlePlaceId}` : null,
-          `/api/google/reviews/search?query=${encodeURIComponent(name + " " + (city || ""))}`,
+          b?.googlePlaceId
+            ? `/api/google/reviews?placeId=${b.googlePlaceId}`
+            : null,
+          `/api/google/reviews/search?query=${encodeURIComponent(
+            name + " " + (city || "")
+          )}`,
         ].filter(Boolean);
 
         for (const p of gUrls) {
@@ -252,7 +295,10 @@ export default function BusinessProfile() {
         }
 
         const idOrSlug = b?._id || slug;
-        const sUrls = [`/api/businesses/${idOrSlug}/reviews`, `/api/reviews?business=${idOrSlug}`];
+        const sUrls = [
+          `/api/businesses/${idOrSlug}/reviews`,
+          `/api/reviews?business=${idOrSlug}`,
+        ];
         for (const p of sUrls) {
           try {
             const { data } = await http.get(p);
@@ -282,7 +328,10 @@ export default function BusinessProfile() {
         rating: myRating,
         comment: myComment || undefined,
       };
-      const targets = [`/api/reviews`, `/api/businesses/${b._id || slug}/reviews`];
+      const targets = [
+        `/api/reviews`,
+        `/api/businesses/${b._id || slug}/reviews`,
+      ];
       for (const p of targets) {
         try {
           await http.post(p, payload);
@@ -290,10 +339,19 @@ export default function BusinessProfile() {
         } catch {}
       }
       setSReviews((prev) => ({
-        rating: calcAvg((prev.reviews || []).map((r) => r.rating).concat([myRating])),
+        rating: calcAvg(
+          (prev.reviews || [])
+            .map((r) => r.rating)
+            .concat([myRating])
+        ),
         count: (prev.count || 0) + 1,
         reviews: [
-          { author: "Misafir", rating: myRating, text: myComment, date: new Date().toISOString() },
+          {
+            author: "Misafir",
+            rating: myRating,
+            text: myComment,
+            date: new Date().toISOString(),
+          },
           ...(prev.reviews || []),
         ].slice(0, 20),
       }));
@@ -317,12 +375,19 @@ export default function BusinessProfile() {
       "@context": "https://schema.org",
       "@type": "LocalBusiness",
       name,
-      address: address ? { "@type": "PostalAddress", streetAddress: address, addressLocality: city || undefined } : undefined,
+      address: address
+        ? {
+            "@type": "PostalAddress",
+            streetAddress: address,
+            addressLocality: city || undefined,
+          }
+        : undefined,
       url: window.location.href,
       telephone: phones[0] || undefined,
       sameAs: [instagramUrl, website].filter(Boolean),
       aggregateRating:
-        avgSafe(gReviews.rating, sReviews.rating) && (gReviews.count || sReviews.count)
+        avgSafe(gReviews.rating, sReviews.rating) &&
+        (gReviews.count || sReviews.count)
           ? {
               "@type": "AggregateRating",
               ratingValue: round1(avgSafe(gReviews.rating, sReviews.rating)),
@@ -332,7 +397,11 @@ export default function BusinessProfile() {
       image: imagesAbs?.slice?.(0, 5),
       geo:
         Number.isFinite(coords.lat) && Number.isFinite(coords.lng)
-          ? { "@type": "GeoCoordinates", latitude: coords.lat, longitude: coords.lng }
+          ? {
+              "@type": "GeoCoordinates",
+              latitude: coords.lat,
+              longitude: coords.lng,
+            }
           : undefined,
     };
     script.text = JSON.stringify(jsonLd);
@@ -340,7 +409,18 @@ export default function BusinessProfile() {
     return () => {
       document.head.removeChild(script);
     };
-  }, [name, address, city, phones, instagramUrl, website, imagesAbs, gReviews, sReviews, coords]);
+  }, [
+    name,
+    address,
+    city,
+    phones,
+    instagramUrl,
+    website,
+    imagesAbs,
+    gReviews,
+    sReviews,
+    coords,
+  ]);
 
   /* ---------------- UI ---------------- */
   return (
@@ -371,10 +451,20 @@ export default function BusinessProfile() {
           <span>{name.toLowerCase()}</span>
         </div>
 
-        <div style={st.grid}>
+        <div
+          style={{
+            ...st.grid,
+            gridTemplateColumns: isMobile ? "1fr" : "1fr 360px",
+            gap: isMobile ? 14 : 22,
+          }}
+        >
           {/* SOL */}
           <section style={st.left}>
-            {imagesAbs.length > 0 ? <LightboxGallery imagesAbs={imagesAbs} title={name} /> : <div style={st.cover} />}
+            {imagesAbs.length > 0 ? (
+              <LightboxGallery imagesAbs={imagesAbs} title={name} />
+            ) : (
+              <div style={st.cover} />
+            )}
 
             <div style={st.card}>
               <h1 style={st.title}>{name}</h1>
@@ -392,7 +482,11 @@ export default function BusinessProfile() {
 
               {/* Aksiyonlar */}
               <div style={{ display: "flex", gap: 8, padding: "0 14px 8px" }}>
-                <button className="ghost" onClick={() => shareBiz({ name, slug })} title="Paylaş">
+                <button
+                  className="ghost"
+                  onClick={() => shareBiz({ name, slug })}
+                  title="Paylaş"
+                >
                   🔗 Paylaş
                 </button>
                 {address && (
@@ -419,20 +513,33 @@ export default function BusinessProfile() {
                 )}
               </div>
 
-              <div style={st.dots}>{Array.from({ length: 32 }).map((_, i) => <i key={i} />)}</div>
+              <div style={st.dots}>
+                {Array.from({ length: 32 }).map((_, i) => (
+                  <i key={i} />
+                ))}
+              </div>
 
               {/* Açıklama */}
               <div style={st.desc}>
                 <div style={st.descTitle}>Açıklama</div>
                 <p style={st.descText}>
-                  {b?.description || b?.about || b?.summary || "Bu işletme henüz açıklama eklemedi."}
+                  {b?.description ||
+                    b?.about ||
+                    b?.summary ||
+                    "Bu işletme henüz açıklama eklemedi."}
                 </p>
               </div>
             </div>
           </section>
 
           {/* SAĞ */}
-          <aside style={st.right}>
+          <aside
+            style={{
+              ...st.right,
+              position: isMobile ? "relative" : "sticky",
+              top: isMobile ? "auto" : 80,
+            }}
+          >
             {/* Rezervasyon */}
             <div style={st.box}>
               <div style={{ margin: "4px 0 10px" }}>
@@ -452,7 +559,10 @@ export default function BusinessProfile() {
                     value={adults}
                     onChange={(e) => {
                       const raw = e.target.value;
-                      const val = raw === "" ? "" : String(Math.max(0, parseInt(raw, 10) || 0));
+                      const val =
+                        raw === ""
+                          ? ""
+                          : String(Math.max(0, parseInt(raw, 10) || 0));
                       setAdults(val);
                     }}
                   />
@@ -467,7 +577,10 @@ export default function BusinessProfile() {
                     value={children}
                     onChange={(e) => {
                       const raw = e.target.value;
-                      const val = raw === "" ? "" : String(Math.max(0, parseInt(raw, 10) || 0));
+                      const val =
+                        raw === ""
+                          ? ""
+                          : String(Math.max(0, parseInt(raw, 10) || 0));
                       setChildren(val);
                     }}
                   />
@@ -477,7 +590,13 @@ export default function BusinessProfile() {
               {childrenNum > 0 && (
                 <div style={{ marginTop: 6 }}>
                   <label style={st.label}>Çocuk Yaşları</label>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: 8,
+                    }}
+                  >
                     {Array.from({ length: childrenNum }).map((_, i) => (
                       <select
                         key={i}
@@ -506,7 +625,11 @@ export default function BusinessProfile() {
 
               <button
                 className="btn"
-                style={{ ...st.reserveBtn, opacity: canReserve ? 1 : 0.6, cursor: canReserve ? "pointer" : "not-allowed" }}
+                style={{
+                  ...st.reserveBtn,
+                  opacity: canReserve ? 1 : 0.6,
+                  cursor: canReserve ? "pointer" : "not-allowed",
+                }}
                 onClick={reserve}
                 disabled={!canReserve}
               >
@@ -517,8 +640,14 @@ export default function BusinessProfile() {
                 style={st.askBtn}
                 onClick={() => {
                   const link =
-                    (instagramUrl && addUtm(instagramUrl, "?utm_source=edogrula&utm_medium=profile&utm_campaign=ask")) ||
-                    (phones[0] ? toWa(phones[0], "Merhaba, bilgi almak istiyorum.") : null);
+                    (instagramUrl &&
+                      addUtm(
+                        instagramUrl,
+                        "?utm_source=edogrula&utm_medium=profile&utm_campaign=ask"
+                      )) ||
+                    (phones[0]
+                      ? toWa(phones[0], "Merhaba, bilgi almak istiyorum.")
+                      : null);
                   if (link) window.open(link, "_blank", "noopener,noreferrer");
                 }}
               >
@@ -530,13 +659,44 @@ export default function BusinessProfile() {
             <section style={st.infoCard}>
               <header style={st.infoHead}>İşletme Bilgileri</header>
               <div style={st.infoRow}>
-                📱 {phones[0] ? <a href={`tel:${phones[0]}`} className="lnk">{prettyPhone(phones[0])}</a> : "—"}
+                📱{" "}
+                {phones[0] ? (
+                  <a href={`tel:${phones[0]}`} className="lnk">
+                    {prettyPhone(phones[0])}
+                  </a>
+                ) : (
+                  "—"
+                )}
               </div>
               <div style={st.infoRow}>
-                📷 {instagram ? <a href={instagramUrl} className="lnk" target="_blank" rel="noreferrer noopener">@{trimAt(instagram)}</a> : "—"}
+                📷{" "}
+                {instagram ? (
+                  <a
+                    href={instagramUrl}
+                    className="lnk"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    @{trimAt(instagram)}
+                  </a>
+                ) : (
+                  "—"
+                )}
               </div>
               <div style={st.infoRow}>
-                🕸️ {website ? <a href={toHttps(website)} className="lnk" target="_blank" rel="noreferrer noopener">{website}</a> : "—"}
+                🕸️{" "}
+                {website ? (
+                  <a
+                    href={toHttps(website)}
+                    className="lnk"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                  >
+                    {website}
+                  </a>
+                ) : (
+                  "—"
+                )}
               </div>
               <div style={st.infoRow}>📍 {address || "—"}</div>
             </section>
@@ -546,13 +706,22 @@ export default function BusinessProfile() {
               <header style={st.revHead}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <Stars value={avgSafe(gReviews.rating, sReviews.rating)} />
-                  <b>{avgSafe(gReviews.rating, sReviews.rating)?.toFixed?.(1) || "—"}</b>
+                  <b>
+                    {avgSafe(gReviews.rating, sReviews.rating)?.toFixed?.(1) ||
+                      "—"}
+                  </b>
                 </div>
                 <div className="tabs">
-                  <button className={`tab ${tab === "google" ? "sel" : ""}`} onClick={() => setTab("google")}>
+                  <button
+                    className={`tab ${tab === "google" ? "sel" : ""}`}
+                    onClick={() => setTab("google")}
+                  >
                     Google
                   </button>
-                  <button className={`tab ${tab === "site" ? "sel" : ""}`} onClick={() => setTab("site")}>
+                  <button
+                    className={`tab ${tab === "site" ? "sel" : ""}`}
+                    onClick={() => setTab("site")}
+                  >
                     E-Doğrula
                   </button>
                 </div>
@@ -563,15 +732,37 @@ export default function BusinessProfile() {
               ) : (
                 <>
                   {tab === "google" ? (
-                    <ReviewList list={gReviews.reviews} empty="Google yorumu bulunamadı." />
+                    <ReviewList
+                      list={gReviews.reviews}
+                      empty="Google yorumu bulunamadı."
+                    />
                   ) : (
                     <>
-                      <ReviewList list={sReviews.reviews} empty="Henüz yorum yok. İlk yorumu sen yaz!" />
+                      <ReviewList
+                        list={sReviews.reviews}
+                        empty="Henüz yorum yok. İlk yorumu sen yaz!"
+                      />
                       <div style={st.rateBox}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                          }}
+                        >
                           <span style={{ fontWeight: 800 }}>Değerlendir:</span>
-                          <StarPicker value={myRating} onChange={alreadyRated ? () => {} : setMyRating} disabled={alreadyRated} />
-                          {alreadyRated && <span style={{ opacity: 0.7, fontSize: 12 }}>teşekkürler, oy verdin ✓</span>}
+                          <StarPicker
+                            value={myRating}
+                            onChange={
+                              alreadyRated ? () => {} : setMyRating
+                            }
+                            disabled={alreadyRated}
+                          />
+                          {alreadyRated && (
+                            <span style={{ opacity: 0.7, fontSize: 12 }}>
+                              teşekkürler, oy verdin ✓
+                            </span>
+                          )}
                         </div>
                         <textarea
                           placeholder="İsteğe bağlı yorumun (maks. 400 karakter)"
@@ -581,7 +772,12 @@ export default function BusinessProfile() {
                           style={st.ta}
                           disabled={alreadyRated}
                         />
-                        <button className="btn" onClick={submitReview} disabled={alreadyRated || myRating < 1} style={st.okBtn}>
+                        <button
+                          className="btn"
+                          onClick={submitReview}
+                          disabled={alreadyRated || myRating < 1}
+                          style={st.okBtn}
+                        >
                           Gönder
                         </button>
                       </div>
@@ -604,13 +800,17 @@ export default function BusinessProfile() {
 function DateRangePicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
   const today = stripTime(new Date());
-  const [view, setView] = useState(() => new Date(today.getFullYear(), today.getMonth(), 1));
+  const [view, setView] = useState(
+    () => new Date(today.getFullYear(), today.getMonth(), 1)
+  );
   const boxRef = useRef(null);
 
   const s = toDate(value.start);
   const e = toDate(value.end);
 
-  const label = s ? `${fmtTR(value.start)} — ${e ? fmtTR(value.end) : "seçiniz"}` : "gg.aa.yyyy — gg.aa.yyyy";
+  const label = s
+    ? `${fmtTR(value.start)} — ${e ? fmtTR(value.end) : "seçiniz"}`
+    : "gg.aa.yyyy — gg.aa.yyyy";
   const days = buildMonth(view);
 
   // dış tıkla kapat
@@ -642,17 +842,35 @@ function DateRangePicker({ value, onChange }) {
 
   return (
     <div style={{ position: "relative" }} ref={boxRef}>
-      <button className="ghost" onClick={() => setOpen((o) => !o)} style={{ width: "100%", textAlign: "left" }} aria-expanded={open}>
+      <button
+        className="ghost"
+        onClick={() => setOpen((o) => !o)}
+        style={{ width: "100%", textAlign: "left" }}
+        aria-expanded={open}
+      >
         {label}
       </button>
       {open && (
         <div style={st.cal} role="dialog" aria-label="Takvim">
           <div style={st.calHead}>
-            <button className="ghost" onClick={() => setView((prev) => addMonths(prev, -1))} aria-label="Önceki ay">
+            <button
+              className="ghost"
+              onClick={() => setView((prev) => addMonths(prev, -1))}
+              aria-label="Önceki ay"
+            >
               ‹
             </button>
-            <b>{view.toLocaleDateString("tr-TR", { month: "long", year: "numeric" })}</b>
-            <button className="ghost" onClick={() => setView((prev) => addMonths(prev, 1))} aria-label="Sonraki ay">
+            <b>
+              {view.toLocaleDateString("tr-TR", {
+                month: "long",
+                year: "numeric",
+              })}
+            </b>
+            <button
+              className="ghost"
+              onClick={() => setView((prev) => addMonths(prev, 1))}
+              aria-label="Sonraki ay"
+            >
               ›
             </button>
           </div>
@@ -676,9 +894,15 @@ function DateRangePicker({ value, onChange }) {
                   style={{
                     ...st.dbtn,
                     opacity: disabled ? 0.35 : 1,
-                    background: isStart || isEnd ? "#111827" : inRange ? "#e5f3ff" : "var(--card)",
+                    background:
+                      isStart || isEnd
+                        ? "#111827"
+                        : inRange
+                        ? "#e5f3ff"
+                        : "var(--card)",
                     color: isStart || isEnd ? "#fff" : "inherit",
-                    borderColor: isStart || isEnd ? "#111827" : "var(--border)",
+                    borderColor:
+                      isStart || isEnd ? "#111827" : "var(--border)",
                   }}
                   aria-current={isStart || isEnd ? "date" : undefined}
                 >
@@ -687,7 +911,13 @@ function DateRangePicker({ value, onChange }) {
               );
             })}
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: 8,
+            }}
+          >
             <button className="ghost" onClick={clear}>
               Temizle
             </button>
@@ -703,17 +933,41 @@ function DateRangePicker({ value, onChange }) {
 
 /* ---------------- Yorum listesi & yıldızlar ---------------- */
 function ReviewList({ list = [], empty }) {
-  if (!list.length) return <div style={{ opacity: 0.75, fontSize: 14, padding: "6px 2px" }}>{empty}</div>;
+  if (!list.length)
+    return (
+      <div style={{ opacity: 0.75, fontSize: 14, padding: "6px 2px" }}>
+        {empty}
+      </div>
+    );
   return (
     <div style={{ display: "grid", gap: 10 }}>
       {list.slice(0, 5).map((r, i) => (
-        <div key={i} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div
+          key={i}
+          style={{
+            border: "1px solid var(--border)",
+            borderRadius: 10,
+            padding: 10,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
             <strong>{r.author || r.user || "Kullanıcı"}</strong>
             <Stars value={r.rating} small />
           </div>
-          {r.text && <p style={{ margin: "6px 0 0", lineHeight: 1.45 }}>{r.text}</p>}
-          {r.date && <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6 }}>{fmtDate(r.date)}</div>}
+          {r.text && (
+            <p style={{ margin: "6px 0 0", lineHeight: 1.45 }}>{r.text}</p>
+          )}
+          {r.date && (
+            <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6 }}>
+              {fmtDate(r.date)}
+            </div>
+          )}
         </div>
       ))}
     </div>
@@ -733,9 +987,21 @@ function Stars({ value = 0, small = false }) {
 }
 function StarPicker({ value = 0, onChange = () => {}, disabled }) {
   return (
-    <div style={{ display: "inline-flex", gap: 4, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1 }}>
+    <div
+      style={{
+        display: "inline-flex",
+        gap: 4,
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.6 : 1,
+      }}
+    >
       {Array.from({ length: 5 }).map((_, i) => (
-        <span key={i} onClick={() => !disabled && onChange(i + 1)} title={`${i + 1}`} style={{ fontSize: 22, userSelect: "none" }}>
+        <span
+          key={i}
+          onClick={() => !disabled && onChange(i + 1)}
+          title={`${i + 1}`}
+          style={{ fontSize: 22, userSelect: "none" }}
+        >
           {i < value ? "★" : "☆"}
         </span>
       ))}
@@ -746,16 +1012,23 @@ function StarPicker({ value = 0, onChange = () => {}, disabled }) {
 /* ---------------- Yardımcılar ---------------- */
 function normalizeGoogleReviews(data) {
   if (!data) return null;
-  const rating = Number(data.rating ?? data.averageRating ?? data.result?.rating);
-  const count = Number(data.count ?? data.userRatingsTotal ?? data.result?.count) || (data.reviews?.length || 0);
+  const rating = Number(
+    data.rating ?? data.averageRating ?? data.result?.rating
+  );
+  const count =
+    Number(data.count ?? data.userRatingsTotal ?? data.result?.count) ||
+    (data.reviews?.length || 0);
   const arr = data.reviews || data.result?.reviews || [];
   const reviews = arr.map((r) => ({
     author: r.author_name || r.author || r.user || "Kullanıcı",
     text: r.text || r.comment || "",
     rating: Number(r.rating || r.stars || 0),
-    date: r.time ? new Date(r.time * 1000).toISOString() : r.date || r.createdAt || null,
+    date: r.time
+      ? new Date(r.time * 1000).toISOString()
+      : r.date || r.createdAt || null,
   }));
-  if (!Number.isFinite(rating) && !reviews.length) return { rating: null, count: 0, reviews: [] };
+  if (!Number.isFinite(rating) && !reviews.length)
+    return { rating: null, count: 0, reviews: [] };
   return { rating, count, reviews };
 }
 function normalizeSiteReviews(data) {
@@ -769,7 +1042,15 @@ function normalizeSiteReviews(data) {
       rating: Number(r.rating || r.stars || 0),
       date: r.createdAt || r.date || null,
     })) || [];
-  return { rating: Number.isFinite(avg) ? avg : list.length ? calcAvg(list.map((x) => x.rating)) : null, count: total, reviews: list };
+  return {
+    rating: Number.isFinite(avg)
+      ? avg
+      : list.length
+      ? calcAvg(list.map((x) => x.rating))
+      : null,
+    count: total,
+    reviews: list,
+  };
 }
 function calcAvg(nums) {
   const a = nums.map(Number).filter((n) => Number.isFinite(n));
@@ -784,7 +1065,11 @@ function round1(n) {
 }
 
 function slugToTitle(s) {
-  return String(s || "").replace(/[-_]/g, " ").replace(/\s+/g, " ").trim().replace(/^./, (c) => c.toUpperCase());
+  return String(s || "")
+    .replace(/[-_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (c) => c.toUpperCase());
 }
 function toHttps(u) {
   return /^https?:\/\//i.test(u) ? u : `https://${u}`;
@@ -799,7 +1084,10 @@ function toDate(ymd) {
   return isNaN(dt) ? null : dt;
 }
 function toYmd(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(d.getDate()).padStart(2, "0")}`;
 }
 function stripTime(d) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -810,7 +1098,11 @@ function addMonths(d, n) {
   return nd;
 }
 function sameDay(a, b) {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
 }
 function buildMonth(firstDay) {
   const start = new Date(firstDay.getFullYear(), firstDay.getMonth(), 1);
@@ -859,7 +1151,9 @@ function toMapUrl(address, coords) {
   if (Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
     return `https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`;
   }
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
+    address
+  )}`;
 }
 function shareBiz({ name, slug }) {
   const url = `${window.location.origin}/isletme/${encodeURIComponent(slug)}`;
@@ -874,7 +1168,13 @@ function shareBiz({ name, slug }) {
 }
 function fmtDate(d) {
   const dt = new Date(d);
-  return isNaN(dt) ? "" : dt.toLocaleDateString("tr-TR", { day: "2-digit", month: "long", year: "numeric" });
+  return isNaN(dt)
+    ? ""
+    : dt.toLocaleDateString("tr-TR", {
+        day: "2-digit",
+        month: "long",
+        year: "numeric",
+      });
 }
 function Loader() {
   return (
@@ -888,7 +1188,12 @@ function Loader() {
 
 /* ---------------- Stil ---------------- */
 const st = {
-  page: { background: "var(--bg)", color: "var(--fg)", minHeight: "100vh", fontFamily: "Inter, Segoe UI, Tahoma, sans-serif" },
+  page: {
+    background: "var(--bg)",
+    color: "var(--fg)",
+    minHeight: "100vh",
+    fontFamily: "Inter, Segoe UI, Tahoma, sans-serif",
+  },
   head: {
     position: "sticky",
     top: 0,
@@ -901,13 +1206,24 @@ const st = {
     borderBottom: "1px solid var(--border)",
   },
   container: { width: "min(1140px, 94vw)", margin: "14px auto 40px" },
-  breadcrumb: { margin: "10px 2px 14px", color: "var(--fg-3)", display: "flex", gap: 6, alignItems: "center" },
+  breadcrumb: {
+    margin: "10px 2px 14px",
+    color: "var(--fg-3)",
+    display: "flex",
+    gap: 6,
+    alignItems: "center",
+  },
 
-  grid: { display: "grid", gridTemplateColumns: "1fr 360px", gap: 22, alignItems: "start" },
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 360px",
+    gap: 22,
+    alignItems: "start",
+  },
 
   left: { minWidth: 0 },
   cover: {
-    height: 340,
+    height: "clamp(220px, 42vh, 340px)",
     background: "#efe6d9",
     borderRadius: 14,
     border: "1px solid var(--border)",
@@ -922,7 +1238,13 @@ const st = {
     boxShadow: "0 12px 32px rgba(0,0,0,.05)",
   },
   title: { margin: "0 0 8px", padding: "12px 14px 0", fontSize: 22, fontWeight: 900 },
-  metaRow: { display: "flex", gap: 10, flexWrap: "wrap", padding: "0 14px 10px", opacity: 0.85 },
+  metaRow: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    padding: "0 14px 10px",
+    opacity: 0.85,
+  },
   dots: { display: "grid", gridTemplateColumns: "repeat(32, 1fr)", gap: 4, padding: "0 14px 10px" },
 
   desc: { padding: "6px 14px 14px" },
@@ -931,7 +1253,13 @@ const st = {
 
   right: { position: "sticky", top: 80, display: "grid", gap: 14 },
 
-  box: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: 14, padding: 14, boxShadow: "0 16px 40px rgba(0,0,0,.06)" },
+  box: {
+    border: "1px solid var(--border)",
+    background: "var(--card)",
+    borderRadius: 14,
+    padding: 14,
+    boxShadow: "0 16px 40px rgba(0,0,0,.06)",
+  },
 
   row2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
   inputWrap: { display: "grid", gap: 6, margin: "10px 0" },
@@ -959,14 +1287,36 @@ const st = {
     fontWeight: 800,
     marginTop: 8,
   },
-  sel: { width: "100%", border: "1px solid var(--border)", background: "var(--card)", color: "var(--fg)", borderRadius: 10, padding: "8px" },
+  sel: {
+    width: "100%",
+    border: "1px solid var(--border)",
+    background: "var(--card)",
+    color: "var(--fg)",
+    borderRadius: 10,
+    padding: "8px",
+  },
 
-  infoCard: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: 14, padding: 12 },
+  infoCard: {
+    border: "1px solid var(--border)",
+    background: "var(--card)",
+    borderRadius: 14,
+    padding: 12,
+  },
   infoHead: { fontWeight: 900, marginBottom: 8 },
   infoRow: { padding: "6px 4px", borderTop: "1px dashed var(--border)" },
 
-  reviews: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: 14, padding: 12 },
-  revHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  reviews: {
+    border: "1px solid var(--border)",
+    background: "var(--card)",
+    borderRadius: 14,
+    padding: 12,
+  },
+  revHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
   rateBox: { borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 10 },
   ta: {
     width: "100%",
@@ -979,7 +1329,14 @@ const st = {
     margin: "8px 0",
   },
 
-  okBtn: { background: "#22c55e", color: "#fff", border: "none", borderRadius: 10, padding: "10px 12px", fontWeight: 800 },
+  okBtn: {
+    background: "#22c55e",
+    color: "#fff",
+    border: "none",
+    borderRadius: 10,
+    padding: "10px 12px",
+    fontWeight: 800,
+  },
 
   err: { marginTop: 10, color: "#ef4444", fontWeight: 700 },
 
@@ -996,8 +1353,20 @@ const st = {
     padding: 10,
     boxShadow: "0 16px 40px rgba(0,0,0,.1)",
   },
-  calHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
-  wdays: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, fontSize: 12, opacity: 0.8, marginBottom: 4 },
+  calHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 8,
+  },
+  wdays: {
+    display: "grid",
+    gridTemplateColumns: "repeat(7,1fr)",
+    gap: 4,
+    fontSize: 12,
+    opacity: 0.8,
+    marginBottom: 4,
+  },
   gridDays: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 },
   dbtn: { height: 34, borderRadius: 8, border: "1px solid var(--border)" },
 };
@@ -1021,8 +1390,4 @@ const globalCSS = `
 .tabs{display:inline-flex; gap:6px}
 .tab{border:1px solid var(--border); background:var(--card); border-radius:999px; padding:6px 10px; font-weight:800; cursor:pointer}
 .tab.sel{background:#111827; color:#fff; border-color:#111827}
-@media (max-width: 960px){
-  body .grid{grid-template-columns:1fr}
-  body .right{position:relative; top:auto}
-}
 `;
