@@ -20,17 +20,7 @@ function useMedia(query) {
   return matches;
 }
 
-/** Profil sayfası — Pro sürüm
- * - Tek axios instance + baseURL normalizasyonu
- * - İşletme fetch: çok uç + abort + sessionStorage cache
- * - Görsel toplama (abs path), Lightbox
- * - Rezervasyon paneli: sağlam doğrulama, dış tıkla-kapat takvim
- * - WhatsApp linkine UTM / ref ekleme
- * - Google + Site yorumları, güvenli normalizasyon
- * - Paylaş / kopyala / harita kısayolları
- * - JSON-LD LocalBusiness (SEO)
- */
-
+/** Profil sayfası (Pro) */
 export default function BusinessProfile() {
   const { slug } = useParams();
   const navigate = useNavigate();
@@ -38,15 +28,20 @@ export default function BusinessProfile() {
   const isMobile = useMedia("(max-width: 960px)");
 
   /* ---------------- HTTP instance ---------------- */
-  const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+  const API_BASE_RAW = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+  // /api ile bitiyorsa köke indir
+  const API_ROOT = useMemo(
+    () => API_BASE_RAW.replace(/\/api(?:\/v\d+)?$/i, ""),
+    [API_BASE_RAW]
+  );
+
   const http = useMemo(() => {
     const inst = axios.create({
-      baseURL: API_BASE || "",
+      baseURL: API_BASE_RAW || "",
       withCredentials: true,
       timeout: 15000,
     });
     inst.interceptors.request.use((cfg) => {
-      // ziyaretçi sayfası; token opsiyonel
       const t =
         localStorage.getItem("adminToken") ||
         localStorage.getItem("token") ||
@@ -55,7 +50,7 @@ export default function BusinessProfile() {
       return cfg;
     });
     return inst;
-  }, [API_BASE]);
+  }, [API_BASE_RAW]);
 
   /* ---------------- state ---------------- */
   const [b, setB] = useState(loc.state?.business || null);
@@ -152,34 +147,91 @@ export default function BusinessProfile() {
     lng: b?.location?.lng ?? b?.lng,
   };
 
-  // Görseller (absolute)
+  // Görseller (absolute, güçlü normalizasyon)
   const imagesAbs = useMemo(() => {
-    if (Array.isArray(b?.galleryAbs) && b.galleryAbs.length)
-      return uniq(b.galleryAbs.filter(Boolean));
-    const base =
-      API_BASE ||
-      (typeof window !== "undefined"
-        ? window.location.origin.replace(/\/+$/, "")
-        : "");
     const out = new Set();
-    const push = (v) => {
-      if (!v) return;
-      if (Array.isArray(v)) return v.forEach(push);
-      if (typeof v !== "string") return;
-      let s = v.trim();
+    const origin =
+      typeof window !== "undefined"
+        ? window.location.origin.replace(/\/+$/, "")
+        : "";
+    const base = API_ROOT || origin;
+
+    const resolve = (s) => {
       if (!s) return;
-      if (/^https?:\/\//i.test(s)) out.add(s);
-      else if (s.startsWith("/uploads/")) out.add(base + s);
-      else if (/^uploads\//i.test(s))
-        out.add(`${base}/${s.replace(/^\/+/, "")}`);
+      let v = String(s).trim();
+      if (!v) return;
+
+      if (/^\/\//.test(v)) {
+        out.add(
+          (typeof window !== "undefined"
+            ? window.location.protocol
+            : "https:") + v
+        );
+        return;
+      }
+      if (/^https?:\/\//i.test(v)) {
+        out.add(v);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(v);
+        if (Array.isArray(parsed)) return parsed.forEach(resolve);
+      } catch {}
+
+      if (/[,\n;]\s*/.test(v)) {
+        v.split(/[,\n;]\s*/).map((x) => x.trim()).filter(Boolean).forEach(resolve);
+        return;
+      }
+
+      if (v.startsWith("/")) {
+        out.add(base + v);
+        return;
+      }
+      if (/^\.\.?\//.test(v)) {
+        try {
+          out.add(new URL(v, base + "/").toString());
+          return;
+        } catch {}
+      }
+
+      if (/^(uploads?|files?|images?|public\/uploads)\b/i.test(v)) {
+        out.add(`${base}/${v.replace(/^\/+/, "")}`);
+        return;
+      }
+
+      try {
+        out.add(new URL(v, base + "/").toString());
+      } catch {
+        out.add(v);
+      }
     };
+
+    const push = (val) => {
+      if (!val) return;
+      if (Array.isArray(val)) return val.forEach(push);
+      if (typeof val === "string") return resolve(val);
+      if (typeof val === "object") {
+        const candKeys = ["url", "src", "path", "image", "srcUrl", "secure_url"];
+        for (const k of candKeys) if (val[k]) resolve(val[k]);
+        if (val.items) push(val.items);
+      }
+    };
+
+    push(b?.galleryAbs);
     push(b?.photos);
     push(b?.images);
     push(b?.gallery);
     push(b?.media);
+    push(b?.pictures);
+    push(b?.albums);
     push(b?.cover);
+    push(b?.coverUrl);
+    push(b?.image);
+    push(b?.imageUrl);
+    push(b?.featuredImage);
+
     return Array.from(out);
-  }, [b, API_BASE]);
+  }, [b, API_ROOT]);
 
   /* ---------------- rezervasyon paneli ---------------- */
   const qs = new URLSearchParams(loc.search);
@@ -204,8 +256,7 @@ export default function BusinessProfile() {
   }, [children]);
 
   const nights = useMemo(() => {
-    const s = toDate(range.start),
-      e = toDate(range.end);
+    const s = toDate(range.start), e = toDate(range.end);
     if (!s || !e) return 0;
     const diff = Math.ceil((e - s) / 86400000);
     return Math.max(1, diff);
@@ -225,17 +276,11 @@ export default function BusinessProfile() {
       `\nYetişkin: ${adultsNum}` +
       `\nÇocuk: ${childrenNum}` +
       (childrenNum > 0
-        ? `\n${childAges
-            .map((age, i) => `${i + 1}. çocuk yaşı: ${age || "belirtilmedi"}`)
-            .join("\n")}`
+        ? `\n${childAges.map((age, i) => `${i + 1}. çocuk yaşı: ${age || "belirtilmedi"}`).join("\n")}`
         : "") +
-      `\nRef: ${window.location.origin}/isletme/${encodeURIComponent(
-        slug
-      )}`;
+      `\nRef: ${window.location.origin}/isletme/${encodeURIComponent(slug)}`;
 
-    const utm = `?utm_source=edogrula&utm_medium=profile&utm_campaign=wa_booking&biz=${encodeURIComponent(
-      slug
-    )}`;
+    const utm = `?utm_source=edogrula&utm_medium=profile&utm_campaign=wa_booking&biz=${encodeURIComponent(slug)}`;
 
     const wa = phones[0] ? toWa(phones[0], msg) : null;
     const link =
@@ -248,23 +293,10 @@ export default function BusinessProfile() {
     if (link) window.open(link, "_blank", "noopener,noreferrer");
   };
 
-  /* ---------------- yorumlar + puanlama ---------------- */
-  const [tab, setTab] = useState("google"); // google | site
-  const [gReviews, setGReviews] = useState({
-    rating: null,
-    count: 0,
-    reviews: [],
-  });
-  const [sReviews, setSReviews] = useState({
-    rating: null,
-    count: 0,
-    reviews: [],
-  });
+  /* ---------------- Yorumlar (Google — tamamı) ---------------- */
+  const [gReviews, setGReviews] = useState({ rating: null, count: 0, reviews: [] });
   const [revLoading, setRevLoading] = useState(false);
-  const [myRating, setMyRating] = useState(0);
-  const [myComment, setMyComment] = useState("");
-  const ratedKey = b?._id ? `rated_${b._id}` : slug ? `rated_${slug}` : null;
-  const alreadyRated = !!(ratedKey && localStorage.getItem(ratedKey));
+  const [reviewMode, setReviewMode] = useState("scroll"); // "scroll" | "list"
 
   useEffect(() => {
     if (!b) return;
@@ -272,14 +304,11 @@ export default function BusinessProfile() {
     (async () => {
       try {
         setRevLoading(true);
-
         const gUrls = [
           b?.googlePlaceId
             ? `/api/google/reviews?placeId=${b.googlePlaceId}`
             : null,
-          `/api/google/reviews/search?query=${encodeURIComponent(
-            name + " " + (city || "")
-          )}`,
+          `/api/google/reviews/search?query=${encodeURIComponent(name + " " + (city || ""))}`,
         ].filter(Boolean);
 
         for (const p of gUrls) {
@@ -293,202 +322,135 @@ export default function BusinessProfile() {
             }
           } catch {}
         }
-
-        const idOrSlug = b?._id || slug;
-        const sUrls = [
-          `/api/businesses/${idOrSlug}/reviews`,
-          `/api/reviews?business=${idOrSlug}`,
-        ];
-        for (const p of sUrls) {
-          try {
-            const { data } = await http.get(p);
-            const got = normalizeSiteReviews(data);
-            if (got) {
-              if (!mounted) return;
-              setSReviews(got);
-              break;
-            }
-          } catch {}
-        }
       } finally {
         if (mounted) setRevLoading(false);
       }
     })();
-    return () => {
-      mounted = false;
-    };
-  }, [b, http, slug, name, city]);
+    return () => { mounted = false; };
+  }, [b, http, name, city]);
 
-  const submitReview = async () => {
-    if (!b) return;
-    if (myRating < 1 || myRating > 5) return;
-    try {
-      const payload = {
-        business: b._id || slug,
-        rating: myRating,
-        comment: myComment || undefined,
-      };
-      const targets = [
-        `/api/reviews`,
-        `/api/businesses/${b._id || slug}/reviews`,
-      ];
-      for (const p of targets) {
-        try {
-          await http.post(p, payload);
-          break;
-        } catch {}
-      }
-      setSReviews((prev) => ({
-        rating: calcAvg(
-          (prev.reviews || [])
-            .map((r) => r.rating)
-            .concat([myRating])
-        ),
-        count: (prev.count || 0) + 1,
-        reviews: [
-          {
-            author: "Misafir",
-            rating: myRating,
-            text: myComment,
-            date: new Date().toISOString(),
-          },
-          ...(prev.reviews || []),
-        ].slice(0, 20),
-      }));
-      if (ratedKey) localStorage.setItem(ratedKey, "1");
-      setMyRating(0);
-      setMyComment("");
-      alert("Değerlendirmeniz alındı. Teşekkürler!");
-    } catch {
-      alert("Gönderilemedi, lütfen tekrar deneyin.");
-    }
-  };
-
-  /* ---------------- SEO: title + JSON-LD ---------------- */
+  /* ---------------- SEO ---------------- */
   useEffect(() => {
     if (!name) return;
     document.title = `${name} · E-Doğrula`;
-    // JSON-LD
     const script = document.createElement("script");
     script.type = "application/ld+json";
     const jsonLd = {
       "@context": "https://schema.org",
       "@type": "LocalBusiness",
       name,
-      address: address
-        ? {
-            "@type": "PostalAddress",
-            streetAddress: address,
-            addressLocality: city || undefined,
-          }
-        : undefined,
+      address: address ? { "@type": "PostalAddress", streetAddress: address, addressLocality: city || undefined } : undefined,
       url: window.location.href,
       telephone: phones[0] || undefined,
       sameAs: [instagramUrl, website].filter(Boolean),
       aggregateRating:
-        avgSafe(gReviews.rating, sReviews.rating) &&
-        (gReviews.count || sReviews.count)
-          ? {
-              "@type": "AggregateRating",
-              ratingValue: round1(avgSafe(gReviews.rating, sReviews.rating)),
-              reviewCount: (gReviews.count || 0) + (sReviews.count || 0),
-            }
+        Number.isFinite(gReviews.rating) && gReviews.count
+          ? { "@type": "AggregateRating", ratingValue: round1(gReviews.rating), reviewCount: gReviews.count }
           : undefined,
       image: imagesAbs?.slice?.(0, 5),
       geo:
         Number.isFinite(coords.lat) && Number.isFinite(coords.lng)
-          ? {
-              "@type": "GeoCoordinates",
-              latitude: coords.lat,
-              longitude: coords.lng,
-            }
+          ? { "@type": "GeoCoordinates", latitude: coords.lat, longitude: coords.lng }
           : undefined,
     };
     script.text = JSON.stringify(jsonLd);
     document.head.appendChild(script);
-    return () => {
-      document.head.removeChild(script);
-    };
-  }, [
-    name,
-    address,
-    city,
-    phones,
-    instagramUrl,
-    website,
-    imagesAbs,
-    gReviews,
-    sReviews,
-    coords,
-  ]);
+    return () => { document.head.removeChild(script); };
+  }, [name, address, city, phones, instagramUrl, website, imagesAbs, gReviews, coords]);
 
-  /* ---------------- UI ---------------- */
+  /* ---------------- LOGO (public'ten, çoklu fallback) ---------------- */
+  const baseUrl = (import.meta.env.BASE_URL || "/").replace(/\/+$/, "/");
+  const logoCandidates = [
+    import.meta.env.VITE_LOGO_URL || "",
+    `${baseUrl}logo-edogrula.png`,
+    `${baseUrl}logo-edogrula.svg`,
+    `${baseUrl}logo.png`,
+    "/logo-edogrula.png",
+    "/logo.png",
+  ].filter(Boolean);
+  const [logoSrc, setLogoSrc] = useState(logoCandidates[0]);
+  const onLogoError = () => {
+    setLogoSrc((prev) => {
+      const i = logoCandidates.indexOf(prev);
+      return i >= 0 && i < logoCandidates.length - 1
+        ? logoCandidates[i + 1]
+        : prev;
+    });
+  };
+
   return (
     <div style={st.page}>
       <style>{globalCSS}</style>
 
+      {/* ---------- HEADER (ultra pro) ---------- */}
       <header style={st.head}>
         <button className="ghost" onClick={() => navigate(-1)} aria-label="Geri">
           ← Geri
         </button>
-        <div style={{ flex: 1 }} />
-        <nav style={{ display: "flex", gap: 18 }}>
-          <a className="lnk" href="/evler">
-            Evler
+
+        <div style={{ flex: 1, textAlign: "center" }}>
+          <a
+            href="/"
+            aria-label="E-Doğrula Ana sayfa"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              textDecoration: "none",
+            }}
+          >
+            <img
+              src={logoSrc}
+              onError={onLogoError}
+              alt="E-Doğrula"
+              style={{
+                height: isMobile ? 40 : 56, // büyütüldü
+                objectFit: "contain",
+                aspectRatio: "auto",
+                filter: "drop-shadow(0 1px 1px rgba(0,0,0,.08))",
+              }}
+            />
           </a>
-          <a className="lnk" href="/iletisim">
-            İletişim
-          </a>
-        </nav>
+        </div>
+
+        <div style={{ width: 48 }} />
       </header>
 
       <main style={st.container}>
         <div style={st.breadcrumb}>
-          <a href="/" className="lnk">
-            Ana sayfa
-          </a>
+          <a href="/" className="lnk">Ana sayfa</a>
           <span> / </span>
           <span>{name.toLowerCase()}</span>
         </div>
 
-        <div
-          style={{
-            ...st.grid,
-            gridTemplateColumns: isMobile ? "1fr" : "1fr 360px",
-            gap: isMobile ? 14 : 22,
-          }}
-        >
+        <div style={{ ...st.grid, gridTemplateColumns: isMobile ? "1fr" : "1fr 360px", gap: isMobile ? 14 : 22 }}>
           {/* SOL */}
           <section style={st.left}>
-            {imagesAbs.length > 0 ? (
-              <LightboxGallery imagesAbs={imagesAbs} title={name} />
-            ) : (
-              <div style={st.cover} />
-            )}
+            {/* HERO/GALERİ — sabit oranlı ultra pro görünüm */}
+            <HeroGallery imagesAbs={imagesAbs} title={name} isMobile={isMobile} />
 
             <div style={st.card}>
               <h1 style={st.title}>{name}</h1>
-              <div style={st.metaRow}>
-                {(city || district) && (
-                  <span>
-                    {district ? `${district}, ` : ""}
-                    {city}
-                  </span>
-                )}
-                <span>• 4 kişi</span>
-                <span>• 2 oda</span>
-                <span>• 1 banyo</span>
-              </div>
 
               {/* Aksiyonlar */}
-              <div style={{ display: "flex", gap: 8, padding: "0 14px 8px" }}>
-                <button
-                  className="ghost"
-                  onClick={() => shareBiz({ name, slug })}
-                  title="Paylaş"
-                >
-                  🔗 Paylaş
+              <div style={{ display: "flex", gap: 8, padding: "0 14px 8px", flexWrap: "wrap" }}>
+                <button className="ghost" onClick={() => shareBiz({ name, slug })} title="Paylaş">
+                  <i className="fa-solid fa-link" />&nbsp; Paylaş
                 </button>
+
+                {/* Yol Tarifi Al */}
+                <a
+                  className="ghost"
+                  href={`https://www.google.com/maps/dir/?api=1&destination=${Number.isFinite(coords.lat) && Number.isFinite(coords.lng)
+                    ? `${coords.lat},${coords.lng}`
+                    : encodeURIComponent(address || name)}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  title="Yol tarifi al"
+                >
+                  <i className="fa-solid fa-location-arrow" />&nbsp; Yol Tarifi Al
+                </a>
+
                 {address && (
                   <a
                     className="ghost"
@@ -497,50 +459,61 @@ export default function BusinessProfile() {
                     rel="noreferrer noopener"
                     title="Haritada aç"
                   >
-                    🗺️ Harita
+                    <i className="fa-regular fa-map" />&nbsp; Harita
                   </a>
                 )}
                 {phones[0] && (
-                  <button
-                    className="ghost"
-                    onClick={() => {
-                      navigator.clipboard.writeText(prettyPhone(phones[0]));
-                    }}
-                    title="Telefon kopyala"
-                  >
-                    📋 Tel
-                  </button>
+                  <a className="ghost" href={`tel:${phones[0]}`} title="Ara">
+                    <i className="fa-solid fa-phone-volume" />&nbsp; Tel
+                  </a>
                 )}
               </div>
 
-              <div style={st.dots}>
-                {Array.from({ length: 32 }).map((_, i) => (
-                  <i key={i} />
-                ))}
-              </div>
+              <div style={st.dots}>{Array.from({ length: 32 }).map((_, i) => <i key={i} />)}</div>
 
               {/* Açıklama */}
               <div style={st.desc}>
                 <div style={st.descTitle}>Açıklama</div>
-                <p style={st.descText}>
-                  {b?.description ||
-                    b?.about ||
-                    b?.summary ||
-                    "Bu işletme henüz açıklama eklemedi."}
-                </p>
+                <p style={st.descText}>{b?.description || b?.about || b?.summary || "Bu işletme henüz açıklama eklemedi."}</p>
               </div>
+            </div>
+
+            {/* HARİTA (varsa) */}
+            {(Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) && (
+              <div style={{ ...st.card, marginTop: 14, padding: 12 }}>
+                <h2 style={{ ...st.descTitle, padding: "0 2px 8px" }}>Konum</h2>
+                <MapDisplay
+                  apiKey={import.meta.env.VITE_GOOGLE_MAPS_API_KEY}
+                  yandexKey={import.meta.env.VITE_YANDEX_MAPS_API_KEY}
+                  lat={coords.lat}
+                  lng={coords.lng}
+                  businessName={name}
+                  address={address}
+                />
+              </div>
+            )}
+
+            {/* GOOGLE YORUMLAR — TAMAMI */}
+            <div style={{ ...st.card, marginTop: 14, padding: 14 }}>
+              <GoogleHeaderBar
+                rating={gReviews.rating}
+                count={gReviews.count || (gReviews.reviews?.length ?? 0)}
+                businessName={name}
+                city={city}
+                placeId={b?.googlePlaceId}
+                mode={reviewMode}
+                onToggleMode={() => setReviewMode(m => (m === "scroll" ? "list" : "scroll"))}
+              />
+              {revLoading ? (
+                <div className="skl" />
+              ) : (
+                <GoogleReviewsArea reviews={gReviews.reviews} mode={reviewMode} />
+              )}
             </div>
           </section>
 
           {/* SAĞ */}
-          <aside
-            style={{
-              ...st.right,
-              position: isMobile ? "relative" : "sticky",
-              top: isMobile ? "auto" : 80,
-            }}
-          >
-            {/* Rezervasyon */}
+          <aside style={{ ...st.right, position: isMobile ? "relative" : "sticky", top: isMobile ?  "auto" : 80 }}>
             <div style={st.box}>
               <div style={{ margin: "4px 0 10px" }}>
                 <label style={st.label}>Tarih</label>
@@ -552,106 +525,38 @@ export default function BusinessProfile() {
                 <div style={st.inputWrap}>
                   <label style={st.label}>Yetişkin</label>
                   <input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    placeholder="0"
+                    type="number" inputMode="numeric" min={0} placeholder="0"
                     value={adults}
                     onChange={(e) => {
                       const raw = e.target.value;
-                      const val =
-                        raw === ""
-                          ? ""
-                          : String(Math.max(0, parseInt(raw, 10) || 0));
+                      const val = raw === "" ? "" : String(Math.max(0, parseInt(raw, 10) || 0));
                       setAdults(val);
                     }}
+                    style={st.sel}
                   />
                 </div>
                 <div style={st.inputWrap}>
                   <label style={st.label}>Çocuk</label>
                   <input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    placeholder="0"
+                    type="number" inputMode="numeric" min={0} placeholder="0"
                     value={children}
                     onChange={(e) => {
                       const raw = e.target.value;
-                      const val =
-                        raw === ""
-                          ? ""
-                          : String(Math.max(0, parseInt(raw, 10) || 0));
+                      const val = raw === "" ? "" : String(Math.max(0, parseInt(raw, 10) || 0));
                       setChildren(val);
                     }}
+                    style={st.sel}
                   />
                 </div>
               </div>
 
-              {childrenNum > 0 && (
-                <div style={{ marginTop: 6 }}>
-                  <label style={st.label}>Çocuk Yaşları</label>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 1fr",
-                      gap: 8,
-                    }}
-                  >
-                    {Array.from({ length: childrenNum }).map((_, i) => (
-                      <select
-                        key={i}
-                        value={childAges[i] || ""}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          setChildAges((a) => {
-                            const c = [...a];
-                            c[i] = v;
-                            return c;
-                          });
-                        }}
-                        style={st.sel}
-                      >
-                        <option value="">Yaş</option>
-                        {Array.from({ length: 18 }).map((__, y) => (
-                          <option key={y} value={y}>
-                            {y}
-                          </option>
-                        ))}
-                      </select>
-                    ))}
-                  </div>
-                </div>
-              )}
-
               <button
                 className="btn"
-                style={{
-                  ...st.reserveBtn,
-                  opacity: canReserve ? 1 : 0.6,
-                  cursor: canReserve ? "pointer" : "not-allowed",
-                }}
+                style={{ ...st.reserveBtn, opacity: canReserve ? 1 : 0.6, cursor: canReserve ? "pointer" : "not-allowed" }}
                 onClick={reserve}
                 disabled={!canReserve}
               >
-                Rezervasyon Yap
-              </button>
-              <button
-                className="btn"
-                style={st.askBtn}
-                onClick={() => {
-                  const link =
-                    (instagramUrl &&
-                      addUtm(
-                        instagramUrl,
-                        "?utm_source=edogrula&utm_medium=profile&utm_campaign=ask"
-                      )) ||
-                    (phones[0]
-                      ? toWa(phones[0], "Merhaba, bilgi almak istiyorum.")
-                      : null);
-                  if (link) window.open(link, "_blank", "noopener,noreferrer");
-                }}
-              >
-                Soruların var mı?
+                Rezervasyon Talebi Gönder
               </button>
             </div>
 
@@ -659,132 +564,26 @@ export default function BusinessProfile() {
             <section style={st.infoCard}>
               <header style={st.infoHead}>İşletme Bilgileri</header>
               <div style={st.infoRow}>
-                📱{" "}
-                {phones[0] ? (
-                  <a href={`tel:${phones[0]}`} className="lnk">
-                    {prettyPhone(phones[0])}
-                  </a>
-                ) : (
-                  "—"
-                )}
+                <i className="fa-solid fa-phone-volume" />&nbsp;
+                {phones[0] ? <a href={`tel:${phones[0]}`} className="lnk">{prettyPhone(phones[0])}</a> : "—"}
               </div>
               <div style={st.infoRow}>
-                📷{" "}
+                <i className="fa-brands fa-instagram" />&nbsp;
                 {instagram ? (
-                  <a
-                    href={instagramUrl}
-                    className="lnk"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                  >
+                  <a href={instagramUrl} className="lnk" target="_blank" rel="noreferrer noopener">
                     @{trimAt(instagram)}
                   </a>
-                ) : (
-                  "—"
-                )}
+                ) : "—"}
               </div>
               <div style={st.infoRow}>
-                🕸️{" "}
+                <i className="fa-regular fa-globe" />&nbsp;
                 {website ? (
-                  <a
-                    href={toHttps(website)}
-                    className="lnk"
-                    target="_blank"
-                    rel="noreferrer noopener"
-                  >
+                  <a href={toHttps(website)} className="lnk" target="_blank" rel="noreferrer noopener">
                     {website}
                   </a>
-                ) : (
-                  "—"
-                )}
+                ) : "—"}
               </div>
-              <div style={st.infoRow}>📍 {address || "—"}</div>
-            </section>
-
-            {/* Yorumlar + Puanlama */}
-            <section style={st.reviews}>
-              <header style={st.revHead}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <Stars value={avgSafe(gReviews.rating, sReviews.rating)} />
-                  <b>
-                    {avgSafe(gReviews.rating, sReviews.rating)?.toFixed?.(1) ||
-                      "—"}
-                  </b>
-                </div>
-                <div className="tabs">
-                  <button
-                    className={`tab ${tab === "google" ? "sel" : ""}`}
-                    onClick={() => setTab("google")}
-                  >
-                    Google
-                  </button>
-                  <button
-                    className={`tab ${tab === "site" ? "sel" : ""}`}
-                    onClick={() => setTab("site")}
-                  >
-                    E-Doğrula
-                  </button>
-                </div>
-              </header>
-
-              {revLoading ? (
-                <div className="skl" />
-              ) : (
-                <>
-                  {tab === "google" ? (
-                    <ReviewList
-                      list={gReviews.reviews}
-                      empty="Google yorumu bulunamadı."
-                    />
-                  ) : (
-                    <>
-                      <ReviewList
-                        list={sReviews.reviews}
-                        empty="Henüz yorum yok. İlk yorumu sen yaz!"
-                      />
-                      <div style={st.rateBox}>
-                        <div
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                          }}
-                        >
-                          <span style={{ fontWeight: 800 }}>Değerlendir:</span>
-                          <StarPicker
-                            value={myRating}
-                            onChange={
-                              alreadyRated ? () => {} : setMyRating
-                            }
-                            disabled={alreadyRated}
-                          />
-                          {alreadyRated && (
-                            <span style={{ opacity: 0.7, fontSize: 12 }}>
-                              teşekkürler, oy verdin ✓
-                            </span>
-                          )}
-                        </div>
-                        <textarea
-                          placeholder="İsteğe bağlı yorumun (maks. 400 karakter)"
-                          maxLength={400}
-                          value={myComment}
-                          onChange={(e) => setMyComment(e.target.value)}
-                          style={st.ta}
-                          disabled={alreadyRated}
-                        />
-                        <button
-                          className="btn"
-                          onClick={submitReview}
-                          disabled={alreadyRated || myRating < 1}
-                          style={st.okBtn}
-                        >
-                          Gönder
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
+              <div style={st.infoRow}><i className="fa-solid fa-location-dot" />&nbsp; {address || "—"}</div>
             </section>
           </aside>
         </div>
@@ -796,7 +595,236 @@ export default function BusinessProfile() {
   );
 }
 
-/* ---------------- Tek takvimli tarih aralığı ---------------- */
+/* ---------------- HERO / GALLERY (oran sabitleme + cover) ---------------- */
+function HeroGallery({ imagesAbs = [], title, isMobile }) {
+  const has = imagesAbs.length > 0;
+  // oran: masaüstü 16:9, mobil 4:3
+  const ratio = isMobile ? "4 / 3" : "16 / 9";
+  const Hmin = isMobile ? 200 : 260;
+  const Hmax = isMobile ? 320 : 420;
+  return (
+    <div
+      className="hero"
+      style={{
+        position: "relative",
+        borderRadius: "var(--r-lg)",
+        border: "1px solid var(--border)",
+        overflow: "hidden",
+        background: "#efe6d9",
+        aspectRatio: ratio,
+        minHeight: Hmin,
+        maxHeight: Hmax,
+      }}
+    >
+      {has ? (
+        <div style={{ height: "100%" }}>
+          <LightboxGallery imagesAbs={imagesAbs} title={title} />
+        </div>
+      ) : (
+        <div style={{ height: "100%" }} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- HARİTA ---------------- */
+function MapDisplay({ apiKey, yandexKey, lat, lng, businessName, address }) {
+  const mapRef = useRef(null);
+  const [provider, setProvider] = useState(apiKey ? "google" : "yandex");
+
+  useEffect(() => { setProvider(apiKey ? "google" : "yandex"); }, [apiKey]);
+
+  useEffect(() => {
+    if (!mapRef.current || !lat || !lng) return;
+
+    if (provider === "google") {
+      if (window.google?.maps) { initGoogle(); return; }
+      if (!document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')) {
+        const s = document.createElement("script");
+        s.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=marker`;
+        s.async = true; s.defer = true; s.onload = initGoogle;
+        document.head.appendChild(s);
+      } else {
+        initGoogle();
+      }
+    } else {
+      if (window.ymaps && window.ymaps.ready) {
+        window.ymaps.ready(initYandex);
+      } else if (!document.querySelector('script[src*="api-maps.yandex.ru"]')) {
+        const s = document.createElement("script");
+        const keyQ = yandexKey ? `&apikey=${yandexKey}` : "";
+        s.src = `https://api-maps.yandex.ru/2.1/?lang=tr_TR${keyQ}`;
+        s.async = true; s.defer = true; s.onload = () => window.ymaps.ready(initYandex);
+        document.head.appendChild(s);
+      }
+    }
+
+    function initGoogle() {
+      const position = { lat, lng };
+      const map = new window.google.maps.Map(mapRef.current, {
+        center: position,
+        zoom: 16,
+        disableDefaultUI: true,
+        zoomControl: true,
+        gestureHandling: "cooperative",
+      });
+      const infoWindow = new window.google.maps.InfoWindow({
+        content: `
+          <div style="font-weight:700;font-size:14px;margin-bottom:4px;">${escapeHtml(businessName)}</div>
+          <div>${escapeHtml(address || "")}</div>
+          <a href="https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}" target="_blank" rel="noopener noreferrer" style="margin-top:8px;display:inline-block;">Yol Tarifi Al</a>
+        `,
+      });
+      const marker = new window.google.maps.marker.AdvancedMarkerElement({ position, map, title: businessName });
+      infoWindow.open(map, marker);
+      marker.addListener("gmp-click", () => infoWindow.open(map, marker));
+    }
+
+    function initYandex() {
+      const ymaps = window.ymaps;
+      const map = new ymaps.Map(mapRef.current, {
+        center: [lat, lng],
+        zoom: 16,
+        controls: ["zoomControl"],
+      }, { suppressMapOpenBlock: true });
+      const placemark = new ymaps.Placemark([lat, lng], {
+        balloonContentHeader: `<strong>${escapeHtml(businessName)}</strong>`,
+        balloonContentBody: `<div>${escapeHtml(address || "")}</div>`,
+        balloonContentFooter: `<a href="https://yandex.com.tr/harita?whatshere[point]=${lng},${lat}&whatshere[zoom]=16&mode=routes&rtext=~${lat},${lng}" target="_blank" rel="noopener">Yol Tarifi Al</a>`,
+        hintContent: escapeHtml(businessName),
+      }, { preset: "islands#blueCircleIcon" });
+      map.geoObjects.add(placemark);
+      placemark.balloon.open();
+    }
+  }, [provider, apiKey, yandexKey, lat, lng, businessName, address]);
+
+  if (!lat || !lng) return null;
+
+  return (
+    <div
+      ref={mapRef}
+      style={{
+        height: "300px",
+        width: "100%",
+        borderRadius: "var(--r-md)",
+        background: "#e5e7eb",
+        border: "1px solid var(--border)",
+      }}
+      aria-label="İşletme konumu haritası"
+    />
+  );
+}
+
+/* ---------------- Google başlık + tüm yorumlar ---------------- */
+function GoogleHeaderBar({ rating, count, businessName, city, placeId, mode, onToggleMode }) {
+  const writeReviewUrl = placeId
+    ? `https://search.google.com/local/writereview?placeid=${placeId}`
+    : `https://www.google.com/search?q=${encodeURIComponent(businessName + " " + (city || "") + " yorum yaz")}`;
+
+  const r = Number(rating) || 0;
+  const c = Number(count) || 0;
+
+  return (
+    <div style={st.gBar}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <span style={st.gIcon}>G</span>
+        <b>Güncel Misafir yorumları Google</b>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <Stars value={Math.round(r)} small />
+          <b style={{ fontSize: 14 }}>{r ? r.toFixed(1) : "—"}</b>
+          <span style={{ opacity: .8, fontSize: 14 }}>
+            Yorum sayısı {c} (72 saatte bir yenilenir)
+          </span>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button className="btn gbtn" onClick={onToggleMode}>
+          {mode === "scroll" ? "Tümünü Listele" : "Yana Kaydır"}
+        </button>
+        <a className="btn gbtn" href={writeReviewUrl} target="_blank" rel="noreferrer noopener">
+          Google üzerinde bizi değerlendirin
+        </a>
+      </div>
+    </div>
+  );
+}
+
+function GoogleReviewsArea({ reviews = [], mode = "scroll" }) {
+  if (!reviews.length)
+    return (
+      <div style={{ opacity: 0.75, fontSize: 14, padding: "6px 2px" }}>
+        Google yorumu bulunamadı.
+      </div>
+    );
+
+  if (mode === "list") {
+    // YORUM SINIRI YOK — HEPSİ ALT ALTA
+    return (
+      <div style={{ display: "grid", gap: 14 }}>
+        {reviews.map((r, i) => <GoogleReviewCard key={i} r={r} />)}
+      </div>
+    );
+  }
+
+  // Varsayılan: yatay kaydırmalı şık görünüm
+  return <GoogleScrollableReviews reviews={reviews} />;
+}
+
+function GoogleScrollableReviews({ reviews = [] }) {
+  const scRef = useRef(null);
+  const scrollBy = (dx) => {
+    const el = scRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dx, behavior: "smooth" });
+  };
+
+  return (
+    <div style={{ position: "relative", marginTop: 6 }}>
+      <button aria-label="sola kaydır" className="gNav left" onClick={() => scrollBy(-Math.min(900, scRef.current?.clientWidth || 360))}>‹</button>
+      <div ref={scRef} style={st.gScroll} className="no-scrollbar">
+        {reviews.map((r, i) => (
+          <GoogleReviewCard key={i} r={r} />
+        ))}
+      </div>
+      <button aria-label="sağa kaydır" className="gNav right" onClick={() => scrollBy(Math.min(900, scRef.current?.clientWidth || 360))}>›</button>
+    </div>
+  );
+}
+
+function GoogleReviewCard({ r }) {
+  const text = String(r.text || "");
+  const initials = (r.author || "Kullanıcı").trim().split(/\s+/).map(s => s[0]).slice(0,2).join("").toUpperCase();
+
+  return (
+    <article style={st.gCard}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <div style={st.avatar}>{initials}</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <strong>{r.author || "Kullanıcı"}</strong>
+            <span style={st.verified}>✔</span>
+          </div>
+          <div style={{ opacity: .7, fontSize: 12 }}>{timeAgoTR(r.date) || "—"}</div>
+        </div>
+        <div style={{ marginLeft: "auto" }}><Stars value={r.rating} small /></div>
+      </div>
+
+      {text && (
+        <p
+          style={{
+            margin: 0,
+            lineHeight: 1.6,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {text}
+        </p>
+      )}
+    </article>
+  );
+}
+
+/* ---------------- Takvim ---------------- */
 function DateRangePicker({ value, onChange }) {
   const [open, setOpen] = useState(false);
   const today = stripTime(new Date());
@@ -813,7 +841,6 @@ function DateRangePicker({ value, onChange }) {
     : "gg.aa.yyyy — gg.aa.yyyy";
   const days = buildMonth(view);
 
-  // dış tıkla kapat
   useEffect(() => {
     if (!open) return;
     const on = (ev) => {
@@ -825,7 +852,7 @@ function DateRangePicker({ value, onChange }) {
   }, [open]);
 
   const pick = (d) => {
-    if (d < today) return; // geçmiş kapalı
+    if (d < today) return;
     if (!s || (s && e)) {
       onChange({ start: toYmd(d), end: "" });
     } else {
@@ -853,26 +880,9 @@ function DateRangePicker({ value, onChange }) {
       {open && (
         <div style={st.cal} role="dialog" aria-label="Takvim">
           <div style={st.calHead}>
-            <button
-              className="ghost"
-              onClick={() => setView((prev) => addMonths(prev, -1))}
-              aria-label="Önceki ay"
-            >
-              ‹
-            </button>
-            <b>
-              {view.toLocaleDateString("tr-TR", {
-                month: "long",
-                year: "numeric",
-              })}
-            </b>
-            <button
-              className="ghost"
-              onClick={() => setView((prev) => addMonths(prev, 1))}
-              aria-label="Sonraki ay"
-            >
-              ›
-            </button>
+            <button className="ghost" onClick={() => setView((prev) => addMonths(prev, -1))} aria-label="Önceki ay">‹</button>
+            <b>{view.toLocaleDateString("tr-TR", { month: "long", year: "numeric" })}</b>
+            <button className="ghost" onClick={() => setView((prev) => addMonths(prev, 1))} aria-label="Sonraki ay">›</button>
           </div>
           <div style={st.wdays}>
             {["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"].map((w) => (
@@ -895,14 +905,9 @@ function DateRangePicker({ value, onChange }) {
                     ...st.dbtn,
                     opacity: disabled ? 0.35 : 1,
                     background:
-                      isStart || isEnd
-                        ? "#111827"
-                        : inRange
-                        ? "#e5f3ff"
-                        : "var(--card)",
+                      isStart || isEnd ? "#111827" : inRange ? "#e5f3ff" : "var(--card)",
                     color: isStart || isEnd ? "#fff" : "inherit",
-                    borderColor:
-                      isStart || isEnd ? "#111827" : "var(--border)",
+                    borderColor: isStart || isEnd ? "#111827" : "var(--border)",
                   }}
                   aria-current={isStart || isEnd ? "date" : undefined}
                 >
@@ -911,19 +916,9 @@ function DateRangePicker({ value, onChange }) {
               );
             })}
           </div>
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginTop: 8,
-            }}
-          >
-            <button className="ghost" onClick={clear}>
-              Temizle
-            </button>
-            <button className="ghost" onClick={() => setOpen(false)}>
-              Tamam
-            </button>
+          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8 }}>
+            <button className="ghost" onClick={clear}>Temizle</button>
+            <button className="ghost" onClick={() => setOpen(false)}>Tamam</button>
           </div>
         </div>
       )}
@@ -931,87 +926,9 @@ function DateRangePicker({ value, onChange }) {
   );
 }
 
-/* ---------------- Yorum listesi & yıldızlar ---------------- */
-function ReviewList({ list = [], empty }) {
-  if (!list.length)
-    return (
-      <div style={{ opacity: 0.75, fontSize: 14, padding: "6px 2px" }}>
-        {empty}
-      </div>
-    );
-  return (
-    <div style={{ display: "grid", gap: 10 }}>
-      {list.slice(0, 5).map((r, i) => (
-        <div
-          key={i}
-          style={{
-            border: "1px solid var(--border)",
-            borderRadius: 10,
-            padding: 10,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <strong>{r.author || r.user || "Kullanıcı"}</strong>
-            <Stars value={r.rating} small />
-          </div>
-          {r.text && (
-            <p style={{ margin: "6px 0 0", lineHeight: 1.45 }}>{r.text}</p>
-          )}
-          {r.date && (
-            <div style={{ opacity: 0.6, fontSize: 12, marginTop: 6 }}>
-              {fmtDate(r.date)}
-            </div>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-function Stars({ value = 0, small = false }) {
-  const v = Math.max(0, Math.min(5, Number(value) || 0));
-  return (
-    <div style={{ display: "inline-flex", gap: 2 }}>
-      {Array.from({ length: 5 }).map((_, i) => (
-        <span key={i} style={{ fontSize: small ? 14 : 18, lineHeight: 1 }}>
-          {i < Math.round(v) ? "★" : "☆"}
-        </span>
-      ))}
-    </div>
-  );
-}
-function StarPicker({ value = 0, onChange = () => {}, disabled }) {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        gap: 4,
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.6 : 1,
-      }}
-    >
-      {Array.from({ length: 5 }).map((_, i) => (
-        <span
-          key={i}
-          onClick={() => !disabled && onChange(i + 1)}
-          title={`${i + 1}`}
-          style={{ fontSize: 22, userSelect: "none" }}
-        >
-          {i < value ? "★" : "☆"}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 /* ---------------- Yardımcılar ---------------- */
 function normalizeGoogleReviews(data) {
-  if (!data) return null;
+  if (!data) return { rating: null, count: 0, reviews: [] };
   const rating = Number(
     data.rating ?? data.averageRating ?? data.result?.rating
   );
@@ -1027,43 +944,9 @@ function normalizeGoogleReviews(data) {
       ? new Date(r.time * 1000).toISOString()
       : r.date || r.createdAt || null,
   }));
-  if (!Number.isFinite(rating) && !reviews.length)
-    return { rating: null, count: 0, reviews: [] };
   return { rating, count, reviews };
 }
-function normalizeSiteReviews(data) {
-  if (!data) return null;
-  const avg = Number(data.avg ?? data.average ?? data.rating);
-  const total = Number(data.total ?? data.count ?? (data.reviews?.length || 0));
-  const list =
-    (data.reviews || data.data || []).map((r) => ({
-      author: r.user?.name || r.author || "Kullanıcı",
-      text: r.text || r.comment || "",
-      rating: Number(r.rating || r.stars || 0),
-      date: r.createdAt || r.date || null,
-    })) || [];
-  return {
-    rating: Number.isFinite(avg)
-      ? avg
-      : list.length
-      ? calcAvg(list.map((x) => x.rating))
-      : null,
-    count: total,
-    reviews: list,
-  };
-}
-function calcAvg(nums) {
-  const a = nums.map(Number).filter((n) => Number.isFinite(n));
-  return a.length ? a.reduce((s, n) => s + n, 0) / a.length : 0;
-}
-function avgSafe(a, b) {
-  const arr = [a, b].map(Number).filter((n) => Number.isFinite(n) && n > 0);
-  return arr.length ? calcAvg(arr) : null;
-}
-function round1(n) {
-  return Math.round(n * 10) / 10;
-}
-
+function round1(n) { return Math.round(n * 10) / 10; }
 function slugToTitle(s) {
   return String(s || "")
     .replace(/[-_]/g, " ")
@@ -1071,57 +954,14 @@ function slugToTitle(s) {
     .trim()
     .replace(/^./, (c) => c.toUpperCase());
 }
-function toHttps(u) {
-  return /^https?:\/\//i.test(u) ? u : `https://${u}`;
-}
-function trimAt(h) {
-  return String(h || "").replace(/^@+/, "");
-}
-function toDate(ymd) {
-  if (!ymd) return null;
-  const [y, m, d] = ymd.split("-").map(Number);
-  const dt = new Date(y, m - 1, d);
-  return isNaN(dt) ? null : dt;
-}
-function toYmd(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
-    2,
-    "0"
-  )}-${String(d.getDate()).padStart(2, "0")}`;
-}
-function stripTime(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-}
-function addMonths(d, n) {
-  const nd = new Date(d);
-  nd.setMonth(nd.getMonth() + n);
-  return nd;
-}
-function sameDay(a, b) {
-  return (
-    a.getFullYear() === b.getFullYear() &&
-    a.getMonth() === b.getMonth() &&
-    a.getDate() === b.getDate()
-  );
-}
-function buildMonth(firstDay) {
-  const start = new Date(firstDay.getFullYear(), firstDay.getMonth(), 1);
-  const weekday = (start.getDay() + 6) % 7; // Pzt=0
-  const days = [];
-  const first = new Date(start);
-  first.setDate(1 - weekday);
-  for (let i = 0; i < 42; i++) {
-    const d = new Date(first);
-    d.setDate(first.getDate() + i);
-    days.push(d);
-  }
-  return days;
-}
-function fmtTR(ymd) {
-  const d = toDate(ymd);
-  if (!d) return "";
-  return d.toLocaleDateString("tr-TR");
-}
+function toHttps(u) { return /^https?:\/\//i.test(u) ? u : `https://${u}`; }
+function trimAt(h) { return String(h || "").replace(/^@+/, ""); }
+function toDate(ymd) { if (!ymd) return null; const [y, m, d] = ymd.split("-").map(Number); const dt = new Date(y, m - 1, d); return isNaN(dt) ? null : dt; }
+function toYmd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
+function stripTime(d) { return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
+function addMonths(d, n) { const nd = new Date(d); nd.setMonth(nd.getMonth() + n); return nd; }
+function sameDay(a, b) { return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate(); }
+function fmtTR(ymd) { const d = toDate(ymd); if (!d) return ""; return d.toLocaleDateString("tr-TR"); }
 function toWa(phone, text) {
   const digits = String(phone || "").replace(/\D/g, "");
   let intl = digits;
@@ -1140,30 +980,20 @@ function addUtm(u, utm) {
     const params = new URLSearchParams(utm.replace(/^\?/, ""));
     params.forEach((v, k) => url.searchParams.set(k, v));
     return url.toString();
-  } catch {
-    return u;
-  }
-}
-function uniq(arr) {
-  return Array.from(new Set(arr));
+  } catch { return u; }
 }
 function toMapUrl(address, coords) {
   if (Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
     return `https://www.google.com/maps/search/?api=1&query=${coords.lat},${coords.lng}`;
   }
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(
-    address
-  )}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
 function shareBiz({ name, slug }) {
   const url = `${window.location.origin}/isletme/${encodeURIComponent(slug)}`;
   if (navigator.share) {
-    navigator
-      .share({ title: `${name} · E-Doğrula`, url })
-      .catch(() => navigator.clipboard.writeText(url));
+    navigator.share({ title: `${name} · E-Doğrula`, url }).catch(() => navigator.clipboard.writeText(url));
   } else {
-    navigator.clipboard.writeText(url);
-    alert("Bağlantı kopyalandı.");
+    navigator.clipboard.writeText(url); alert("Bağlantı kopyalandı.");
   }
 }
 function fmtDate(d) {
@@ -1176,75 +1006,54 @@ function fmtDate(d) {
         year: "numeric",
       });
 }
-function Loader() {
+function timeAgoTR(dateIso) {
+  if (!dateIso) return "";
+  const now = new Date();
+  const d = new Date(dateIso);
+  if (isNaN(d)) return fmtDate(dateIso);
+  const s = Math.floor((now - d) / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const day = Math.floor(h / 24);
+  const mo = Math.floor(day / 30);
+  const yr = Math.floor(day / 365);
+  if (s < 60) return "az önce";
+  if (m < 60) return `${m} dk önce`;
+  if (h < 24) return `${h} saat önce`;
+  if (day < 30) return `${day} gün önce`;
+  if (mo < 12) return `${mo} ay önce`;
+  return `${yr} yıl önce`;
+}
+function escapeHtml(s="") { return s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
+function Loader() { return (<div style={{ marginTop: 16 }}><div className="skl" /><div className="skl" /><div className="skl" /></div>); }
+
+/* ---------- YILDIZ BİLEŞENİ ---------- */
+function Stars({ value = 0, small = false }) {
+  const n = Math.max(0, Math.min(5, Math.round(Number(value) || 0)));
   return (
-    <div style={{ marginTop: 16 }}>
-      <div className="skl" />
-      <div className="skl" />
-      <div className="skl" />
-    </div>
+    <span style={{ display: "inline-flex", gap: 2 }}>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <span key={i} style={{ fontSize: small ? 14 : 18, lineHeight: 1 }}>
+          {i < n ? "★" : "☆"}
+        </span>
+      ))}
+    </span>
   );
 }
 
 /* ---------------- Stil ---------------- */
 const st = {
-  page: {
-    background: "var(--bg)",
-    color: "var(--fg)",
-    minHeight: "100vh",
-    fontFamily: "Inter, Segoe UI, Tahoma, sans-serif",
-  },
-  head: {
-    position: "sticky",
-    top: 0,
-    zIndex: 5,
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "10px 14px",
-    background: "var(--bg)",
-    borderBottom: "1px solid var(--border)",
-  },
+  page: { background: "var(--bg)", color: "var(--fg)", minHeight: "100vh", fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji','Segoe UI Emoji'", letterSpacing: .1 },
+  head: { position: "sticky", top: 0, zIndex: 5, display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", background: "var(--bg)", borderBottom: "1px solid var(--border)", backdropFilter: "saturate(140%) blur(6px)" },
   container: { width: "min(1140px, 94vw)", margin: "14px auto 40px" },
-  breadcrumb: {
-    margin: "10px 2px 14px",
-    color: "var(--fg-3)",
-    display: "flex",
-    gap: 6,
-    alignItems: "center",
-  },
+  breadcrumb: { margin: "10px 2px 14px", color: "var(--fg-3)", display: "flex", gap: 6, alignItems: "center" },
 
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 360px",
-    gap: 22,
-    alignItems: "start",
-  },
+  grid: { display: "grid", gridTemplateColumns: "1fr 360px", gap: 22, alignItems: "start" },
 
   left: { minWidth: 0 },
-  cover: {
-    height: "clamp(220px, 42vh, 340px)",
-    background: "#efe6d9",
-    borderRadius: 14,
-    border: "1px solid var(--border)",
-    boxShadow: "inset 0 2px 10px rgba(0,0,0,.04)",
-  },
 
-  card: {
-    marginTop: 14,
-    border: "1px solid var(--border)",
-    background: "var(--card)",
-    borderRadius: 14,
-    boxShadow: "0 12px 32px rgba(0,0,0,.05)",
-  },
-  title: { margin: "0 0 8px", padding: "12px 14px 0", fontSize: 22, fontWeight: 900 },
-  metaRow: {
-    display: "flex",
-    gap: 10,
-    flexWrap: "wrap",
-    padding: "0 14px 10px",
-    opacity: 0.85,
-  },
+  card: { marginTop: 14, border: "1px solid var(--border)", background: "var(--card)", borderRadius: "var(--r-lg)", boxShadow: "0 12px 32px rgba(0,0,0,.05)", overflow: "hidden" },
+  title: { margin: "0 0 8px", padding: "12px 14px 0", fontSize: 24, fontWeight: 900, letterSpacing: .3 },
   dots: { display: "grid", gridTemplateColumns: "repeat(32, 1fr)", gap: 4, padding: "0 14px 10px" },
 
   desc: { padding: "6px 14px 14px" },
@@ -1253,13 +1062,7 @@ const st = {
 
   right: { position: "sticky", top: 80, display: "grid", gap: 14 },
 
-  box: {
-    border: "1px solid var(--border)",
-    background: "var(--card)",
-    borderRadius: 14,
-    padding: 14,
-    boxShadow: "0 16px 40px rgba(0,0,0,.06)",
-  },
+  box: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: "var(--r-lg)", padding: 14, boxShadow: "0 16px 40px rgba(0,0,0,.06)" },
 
   row2: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
   inputWrap: { display: "grid", gap: 6, margin: "10px 0" },
@@ -1267,127 +1070,99 @@ const st = {
 
   nightsText: { margin: "8px 0 4px", fontWeight: 800, opacity: 0.8 },
 
-  reserveBtn: {
-    width: "100%",
-    background: "#0e3a2f",
-    color: "#fff",
-    border: "none",
-    borderRadius: 10,
-    padding: "12px",
-    fontWeight: 900,
-    marginTop: 8,
-  },
-  askBtn: {
-    width: "100%",
-    background: "#f6f8f9",
-    color: "var(--fg)",
-    border: "1px solid var(--border)",
-    borderRadius: 10,
-    padding: "10px",
-    fontWeight: 800,
-    marginTop: 8,
-  },
-  sel: {
-    width: "100%",
-    border: "1px solid var(--border)",
-    background: "var(--card)",
-    color: "var(--fg)",
-    borderRadius: 10,
-    padding: "8px",
-  },
+  reserveBtn: { width: "100%", background: "#0e3a2f", color: "#fff", border: "none", borderRadius: "var(--r-sm)", padding: "12px", fontWeight: 900, marginTop: 8 },
+  sel: { width: "100%", border: "1px solid var(--border)", background: "var(--card)", color: "var(--fg)", borderRadius: "var(--r-sm)", padding: "8px" },
 
-  infoCard: {
-    border: "1px solid var(--border)",
-    background: "var(--card)",
-    borderRadius: 14,
-    padding: 12,
-  },
+  infoCard: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: "var(--r-lg)", padding: 12 },
   infoHead: { fontWeight: 900, marginBottom: 8 },
-  infoRow: { padding: "6px 4px", borderTop: "1px dashed var(--border)" },
+  infoRow: { padding: "10px 4px", borderTop: "1px dashed var(--border)", display: "flex", alignItems: "center", gap: 8, fontSize: 15 },
 
-  reviews: {
-    border: "1px solid var(--border)",
-    background: "var(--card)",
-    borderRadius: 14,
-    padding: 12,
-  },
-  revHead: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 10,
-  },
-  rateBox: { borderTop: "1px solid var(--border)", marginTop: 10, paddingTop: 10 },
-  ta: {
-    width: "100%",
-    minHeight: 70,
-    padding: 10,
-    border: "1px solid var(--border)",
-    borderRadius: 10,
-    background: "var(--card)",
-    color: "var(--fg)",
-    margin: "8px 0",
-  },
-
-  okBtn: {
-    background: "#22c55e",
-    color: "#fff",
-    border: "none",
-    borderRadius: 10,
-    padding: "10px 12px",
-    fontWeight: 800,
-  },
-
+  reviews: { border: "1px solid var(--border)", background: "var(--card)", borderRadius: "var(--r-lg)", padding: 12 },
   err: { marginTop: 10, color: "#ef4444", fontWeight: 700 },
 
+  // Google-stili bar ve kart listesi
+  gBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: "#dcfce7", border: "1px solid #16a34a33", padding: 12, borderRadius: "var(--r-lg)", marginBottom: 12, flexWrap: "wrap" },
+  gIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, borderRadius: 999, background: "#fff", border: "1px solid var(--border)", fontWeight: 900 },
+  gScroll: { display: "grid", gridAutoFlow: "column", gridAutoColumns: "min(520px, 88vw)", gap: 14, overflowX: "auto", scrollSnapType: "x mandatory", paddingBottom: 4 },
+  gCard: { border: "2px solid #16a34a55", borderRadius: "var(--r-lg)", padding: 12, background: "var(--card)", scrollSnapAlign: "start", boxShadow: "0 1px 0 rgba(0,0,0,.03)" },
+  avatar: { width: 38, height: 38, borderRadius: 999, background: "#e5e7eb", display: "inline-flex", alignItems: "center", justifyContent: "center", fontWeight: 800 },
+  verified: { display: "inline-flex", width: 18, height: 18, borderRadius: 999, background: "#16a34a", color: "#fff", alignItems: "center", justifyContent: "center", fontSize: 12 },
+
   // Takvim
-  cal: {
-    position: "absolute",
-    zIndex: 30,
-    top: "calc(100% + 6px)",
-    left: 0,
-    width: 280,
-    background: "var(--card)",
-    border: "1px solid var(--border)",
-    borderRadius: 12,
-    padding: 10,
-    boxShadow: "0 16px 40px rgba(0,0,0,.1)",
-  },
-  calHead: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginBottom: 8,
-  },
-  wdays: {
-    display: "grid",
-    gridTemplateColumns: "repeat(7,1fr)",
-    gap: 4,
-    fontSize: 12,
-    opacity: 0.8,
-    marginBottom: 4,
-  },
+  cal: { position: "absolute", zIndex: 30, top: "calc(100% + 6px)", left: 0, width: 280, background: "var(--card)", border: "1px solid var(--border)", borderRadius: "var(--r-md)", padding: 10, boxShadow: "0 16px 40px rgba(0,0,0,.1)" },
+  calHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
+  wdays: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, fontSize: 12, opacity: 0.8, marginBottom: 4 },
   gridDays: { display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4 },
-  dbtn: { height: 34, borderRadius: 8, border: "1px solid var(--border)" },
+  dbtn: { height: 34, borderRadius: "var(--r-xs)", border: "1px solid var(--border)" },
 };
 
 const globalCSS = `
 :root{
-  --bg:#ffffff; --card:#ffffff; --fg:#0f172a;
-  --fg-2:#24324a; --fg-3:#475569; --border:#e5e7eb;
+  --bg:#ffffff; --card:#ffffff; --fg:#151826;
+  --fg-2:#28334a; --fg-3:#6b7280; --border:#e6e7eb;
+  --brand:#6a35ff;
+  --r-xs:8px; --r-sm:10px; --r-md:12px; --r-lg:14px;
 }
 :root[data-theme="dark"]{
   --bg:#0b1220; --card:#0f172a; --fg:#e5e7eb;
   --fg-2:#cbd5e1; --fg-3:#94a3b8; --border:#243244;
+  --brand:#8b7bff;
 }
 *{box-sizing:border-box} body{margin:0}
+.no-scrollbar::-webkit-scrollbar{display:none}
+.no-scrollbar{scrollbar-width:none}
 .lnk{color:var(--fg); text-decoration:none; font-weight:700}
 .lnk:hover{text-decoration:underline}
-.ghost{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:8px 10px; cursor:pointer}
+.ghost{
+  background:var(--card); border:1px solid var(--border);
+  border-radius:var(--r-sm); padding:8px 10px; cursor:pointer;
+  transition:border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.ghost:hover{border-color:#c8ced6}
+.ghost:focus-visible{outline:2px solid #111827; outline-offset:2px}
+.btn{ border-radius:var(--r-sm); }
+.btn:focus-visible{ outline:2px solid #111827; outline-offset:2px }
+.gbtn{
+  background:#16a34a; color:#fff; padding:10px 14px; border:0;
+  border-radius:999px; font-weight:900; text-decoration:none;
+}
+.gbtn:hover{ filter:brightness(.95) }
+.gNav{
+  position:absolute; top:50%; transform:translateY(-50%);
+  border:1px solid var(--border); background:#fff; width:34px; height:34px;
+  border-radius:999px; cursor:pointer; z-index:2; font-weight:900;
+  box-shadow:0 6px 16px rgba(0,0,0,.08);
+}
+.gNav.left{ left:-6px } .gNav.right{ right:-6px }
 .dots i{width:10px; height:8px; background:#22c55e; display:block; border-radius:6px}
-.skl{height:16px;border-radius:8px;background:linear-gradient(90deg,rgba(0,0,0,.06),rgba(0,0,0,.12),rgba(0,0,0,.06));animation:sh 1.2s infinite;background-size:200% 100%;margin:8px 0}
+.skl{height:16px;border-radius:var(--r-xs);background:linear-gradient(90deg,rgba(0,0,0,.06),rgba(0,0,0,.12),rgba(0,0,0,.06));animation:sh 1.2s infinite;background-size:200% 100%;margin:8px 0}
 @keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
-.tabs{display:inline-flex; gap:6px}
-.tab{border:1px solid var(--border); background:var(--card); border-radius:999px; padding:6px 10px; font-weight:800; cursor:pointer}
-.tab.sel{background:#111827; color:#fff; border-color:#111827}
-`;
+.lightbox img, .lightbox-gallery img, .gallery img{
+  border-radius:var(--r-lg);
+  border:1px solid var(--border);
+}
+/* HERO içindeki tüm img/iframes tam kapa */
+.hero img, .hero picture, .hero video, .hero iframe {
+  width: 100%; height: 100%; object-fit: cover;
+}
+input, select, textarea{ outline:none; }
+input:hover, select:hover, textarea:hover{ border-color:#c9d1d9; }
+input:focus, select:focus, textarea:focus{
+  border-color:#94a3b8; box-shadow:0 0 0 3px rgba(148,163,184,.25);
+}
+`; // backtick KAPALI — (Önceki hata buradaydı)
+
+/** Verilen ayın takvim ızgarası (6 satır x 7 gün = 42 hücre) */
+function buildMonth(firstDay) {
+  const start = new Date(firstDay.getFullYear(), firstDay.getMonth(), 1);
+  const weekday = (start.getDay() + 6) % 7; // Pzt=0
+  const days = [];
+  const first = new Date(start);
+  first.setDate(1 - weekday);
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(first);
+    d.setDate(first.getDate() + i);
+    days.push(d);
+  }
+  return days;
+}
