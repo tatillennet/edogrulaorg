@@ -1,113 +1,84 @@
-// backend/routes/google.js
-import express from "express";
-import axios from "axios";
+// backend/routes/google.js  (Node 22: fetch global)
+import { Router } from "express";
+const router = Router();
 
-const router = express.Router();
+// küçük yardımcı: güvenli env kontrol logu
+function maskKey(k) { return k ? `${k.slice(0,4)}…(${k.length})` : "MISSING"; }
 
-// ❗️ DİKKAT: API_KEY tanımını buradan kaldırdık. 
-// Artık fonksiyonların içinde okunacak.
-
-// Cache ve Normalize fonksiyonları aynı kalıyor...
-const cache = new Map();
-const getCached = async (key, fn, ttlMs = 30 * 60 * 1000) => {
-  const hit = cache.get(key);
-  if (hit && hit.exp > Date.now()) return hit.val;
-  const val = await fn();
-  cache.set(key, { val, exp: Date.now() + ttlMs });
-  return val;
-};
-
-const normalize = (place) => ({
-  rating: place?.rating ?? null,
-  count: place?.user_ratings_total ?? 0,
-  reviews: (place?.reviews || []).map((r) => ({
-    author: r.author_name,
-    rating: r.rating,
-    text: r.text,
-    date: r.time ? new Date(r.time * 1000).toISOString() : null,
-    photo: r.profile_photo_url,
-  })),
-});
-
-/** GET /api/google/reviews?placeId=... */
+// GET /api/google/reviews?placeId=...
 router.get("/reviews", async (req, res) => {
   try {
-    // ✅ API Anahtarını fonksiyonun içinde, istek geldiği anda oku.
-    const API_KEY = process.env.GOOGLE_PLACES_API_KEY; 
-    
-    if (!API_KEY) return res.status(500).json({ error: "API key yok" });
+    const key = process.env.GOOGLE_PLACES_API_KEY;
+    if (!key) return res.status(500).json({ error: "GOOGLE_PLACES_API_KEY missing" });
+
     const { placeId } = req.query;
-    if (!placeId) return res.status(400).json({ error: "placeId gerekli" });
+    if (!placeId) return res.status(400).json({ error: "placeId required" });
 
-    const url = "https://maps.googleapis.com/maps/api/place/details/json";
-    const params = {
-      place_id: placeId,
-      fields: "rating,user_ratings_total,reviews",
-      reviews_sort: "newest",
-      reviews_no_translations: "true",
-      key: API_KEY,
-    };
+    const base = `https://places.googleapis.com/v1/places/${placeId}`;
 
-    const data = await getCached(`details:${placeId}`, async () => {
-      const { data } = await axios.get(url, { params, timeout: 12000 });
-      if (data.status !== "OK") throw new Error(data.status);
-      return data.result;
+    // 1) reviews dahil dene
+    let r = await fetch(base, {
+      headers: {
+        "X-Goog-Api-Key": key,
+        "X-Goog-FieldMask": "id,displayName,googleMapsUri,rating,userRatingCount,reviews"
+      }
     });
+    let text = await r.text();
 
-    return res.json(normalize(data));
+    // 2) reviews yüzünden hata olursa fallback (ör. 400/403)
+    if (!r.ok) {
+      console.error("[places details] status:", r.status, "key:", maskKey(key), "resp:", text);
+      // reviews'ı çıkarıp minimal alanlarla tekrar dene
+      const r2 = await fetch(base, {
+        headers: {
+          "X-Goog-Api-Key": key,
+          "X-Goog-FieldMask": "id,displayName,googleMapsUri,rating,userRatingCount"
+        }
+      });
+      const text2 = await r2.text();
+      if (!r2.ok) {
+        console.error("[details fallback] status:", r2.status, "resp:", text2);
+        return res.status(r2.status).type("application/json").send(text2);
+      }
+      return res.type("application/json").send(text2);
+    }
+
+    // 200 => direkt geçir
+    res.type("application/json").send(text);
   } catch (e) {
-    console.error("Hata /api/google/reviews:", e.message);
-    return res.status(500).json({ error: "google_details_failed" });
+    console.error(e);
+    res.status(500).json({ error: "internal error", detail: String(e?.message || e) });
   }
 });
 
-/** GET /api/google/reviews/search?query=... */
+// GET /api/google/reviews/search?query=...
 router.get("/reviews/search", async (req, res) => {
   try {
-    // ✅ API Anahtarını fonksiyonun içinde, istek geldiği anda oku.
-    const API_KEY = process.env.GOOGLE_PLACES_API_KEY; 
+    const key = process.env.GOOGLE_PLACES_API_KEY;
+    if (!key) return res.status(500).json({ error: "GOOGLE_PLACES_API_KEY missing" });
 
-    if (!API_KEY) {
-        console.error("❌ HATA: API anahtarı .env dosyasında bulunamadı veya okunamadı!");
-        return res.status(500).json({ error: "API key yok" });
-    }
-    
     const { query } = req.query;
-    if (!query) return res.status(400).json({ error: "query gerekli" });
+    if (!query) return res.status(400).json({ error: "query required" });
 
-    // 1) Find Place
-    const findUrl = "https://maps.googleapis.com/maps/api/place/findplacefromtext/json";
-    const findParams = {
-      input: query,
-      inputtype: "textquery",
-      fields: "place_id",
-      key: API_KEY,
-    };
-    const placeId = await getCached(`find:${query}`, async () => {
-      const { data } = await axios.get(findUrl, { params: findParams, timeout: 12000 });
-      if (!data.candidates?.length) throw new Error("not_found");
-      return data.candidates[0].place_id;
+    const r = await fetch("https://places.googleapis.com/v1/places:searchText", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": key,
+        "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.googleMapsUri"
+      },
+      body: JSON.stringify({ textQuery: query })
     });
 
-    // 2) Details
-    const detUrl = "https://maps.googleapis.com/maps/api/place/details/json";
-    const detParams = {
-      place_id: placeId,
-      fields: "rating,user_ratings_total,reviews",
-      reviews_sort: "newest",
-      reviews_no_translations: "true",
-      key: API_KEY,
-    };
-    const details = await getCached(`details:${placeId}`, async () => {
-      const { data } = await axios.get(detUrl, { params: detParams, timeout: 12000 });
-      if (data.status !== "OK") throw new Error(data.status);
-      return data.result;
-    });
-
-    return res.json({ placeId: placeId, ...normalize(details) });
+    const text = await r.text();
+    if (!r.ok) {
+      console.error("[searchText] status:", r.status, "key:", maskKey(key), "resp:", text);
+      return res.status(r.status).type("application/json").send(text);
+    }
+    res.type("application/json").send(text);
   } catch (e) {
-    console.error("Hata /api/google/search:", e.message);
-    return res.status(500).json({ error: "google_search_failed", message: e.message });
+    console.error(e);
+    res.status(500).json({ error: "internal error", detail: String(e?.message || e) });
   }
 });
 
