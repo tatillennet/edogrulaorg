@@ -21,7 +21,7 @@ function useMedia(query) {
 }
 
 /* --- Google Reviews ayarları (tam yorumlar) --- */
-const GOOGLE_REVIEWS_LIMIT = 50; // tüm yorumları almak için 50 iste
+const GOOGLE_REVIEWS_LIMIT = 50; // mümkün olan en fazla yorumu iste
 
 /** Profil sayfası (Pro) */
 export default function BusinessProfile() {
@@ -31,16 +31,13 @@ export default function BusinessProfile() {
   const isMobile = useMedia("(max-width: 960px)");
 
   /* ---------------- HTTP instance ---------------- */
-  const API_BASE_RAW = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-  // /api ile bitiyorsa köke indir
-  const API_ROOT = useMemo(
-    () => API_BASE_RAW.replace(/\/api(?:\/v\d+)?$/i, ""),
-    [API_BASE_RAW]
-  );
+  const RAW = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+  // VITE_API_URL '/api' ile bitiyorsa köke indir (çift /api hatasını önler)
+  const API_ROOT = useMemo(() => RAW.replace(/\/api(?:\/v\d+)?$/i, ""), [RAW]);
 
   const http = useMemo(() => {
     const inst = axios.create({
-      baseURL: API_BASE_RAW || "",
+      baseURL: API_ROOT || "",
       withCredentials: true,
       timeout: 15000,
     });
@@ -53,7 +50,7 @@ export default function BusinessProfile() {
       return cfg;
     });
     return inst;
-  }, [API_BASE_RAW]);
+  }, [API_ROOT]);
 
   /* ---------------- state ---------------- */
   const [b, setB] = useState(loc.state?.business || null);
@@ -309,7 +306,6 @@ export default function BusinessProfile() {
       try {
         setRevLoading(true);
 
-        // Önce placeId varsa onu dene; yoksa arama
         const reqs = [];
         if (b?.googlePlaceId) {
           reqs.push(
@@ -333,7 +329,7 @@ export default function BusinessProfile() {
               break;
             }
           } catch {
-            // bu isteği es geçip bir sonrakine geçiyoruz
+            // sıradakini dene
           }
         }
       } finally {
@@ -949,14 +945,13 @@ function DateRangePicker({ value, onChange }) {
 
 /* ---------------- Yardımcılar ---------------- */
 function normalizeGoogleReviews(data) {
-  // Backend "new" mod ise: { success, place:{...}, reviews:[...], mode:"new", totalReturned }
-  // Legacy mod ise farklı alan adları dönebilir.
   if (!data) return { rating: null, count: 0, reviews: [], _mode: undefined };
 
+  // place öncelikli
   const place = data.place || data.result || {};
-  const rating = (
-    Number(place.rating ?? data.rating ?? data.averageRating) || null
-  );
+
+  const ratingRaw = place.rating ?? data.rating ?? data.averageRating;
+  const rating = Number.isFinite(Number(ratingRaw)) ? Number(ratingRaw) : null;
 
   let count =
     Number(
@@ -967,29 +962,41 @@ function normalizeGoogleReviews(data) {
       data.userRatingsTotal
     ) || 0;
 
-  const rawReviews =
+  const raw =
     data.reviews ||
     place.reviews ||
     data.result?.reviews ||
     [];
 
-  if (!count && Array.isArray(rawReviews)) count = rawReviews.length;
+  if (!count && Array.isArray(raw)) count = raw.length;
 
-  const reviews = rawReviews.map((r) => ({
-    author:
-      r.author ||
-      r.author_name ||
-      r.user ||
-      r.authorAttribution?.displayName ||
-      "Kullanıcı",
-    text: r.text?.text ?? r.text ?? r.comment ?? "",
-    rating: Number(r.rating || r.stars || 0),
-    date:
-      r.publishTime ||
-      (r.time ? new Date(r.time * 1000).toISOString() : r.date || r.createdAt || null),
-    authorUrl: r.authorAttribution?.uri || r.author_url || undefined,
-    authorPhoto: r.authorAttribution?.photoUri || r.profile_photo_url || undefined,
-  }));
+  const reviews = raw.map((r) => {
+    // tarih: unix saniye, ISO string veya bilinmeyen olabilir
+    const t = r.publishTime ?? r.time ?? r.date ?? r.createdAt ?? null;
+    let iso = null;
+    if (typeof t === "number") {
+      const d = new Date(t * 1000);
+      iso = isNaN(d) ? null : d.toISOString();
+    } else if (typeof t === "string") {
+      const d = new Date(t);
+      iso = isNaN(d) ? t : d.toISOString();
+    }
+
+    return {
+      author:
+        r.author ||
+        r.author_name ||
+        r.user ||
+        r.authorAttribution?.displayName ||
+        "Kullanıcı",
+      text: r.text?.text ?? r.text ?? r.comment ?? "",
+      rating: Number(r.rating || r.stars || 0),
+      date: iso,
+      authorUrl: r.authorAttribution?.uri || r.author_url || undefined,
+      authorPhoto: r.authorAttribution?.photoUri || r.profile_photo_url || undefined,
+    };
+  });
+
   return { rating, count, reviews, _mode: data.mode };
 }
 function round1(n) { return Math.round(n * 10) / 10; }
@@ -1196,7 +1203,7 @@ input:hover, select:hover, textarea:hover{ border-color:#c9d1d9; }
 input:focus, select:focus, textarea:focus{
   border-color:#94a3b8; box-shadow:0 0 0 3px rgba(148,163,184,.25);
 }
-`; // backtick KAPALI — (Önceki hata buradaydı)
+`; // backtick KAPALI
 
 /** Verilen ayın takvim ızgarası (6 satır x 7 gün = 42 hücre) */
 function buildMonth(firstDay) {
