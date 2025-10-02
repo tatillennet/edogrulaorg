@@ -9,13 +9,11 @@ import {
   FaWhatsapp,
   FaMagnifyingGlass,
   FaXmark,
-  FaMicrophone,
-  FaRegCopy,
+  FaRegPaste, // ⬅️ kopyala yerine yapıştır
   FaTag,
   FaPhone,
   FaGlobe,
   FaLocationDot,
-  FaCheck,
   FaTriangleExclamation,
   FaCircleInfo,
   FaLink,
@@ -118,10 +116,8 @@ export default function Search() {
   const [showModal, setShowModal] = useState(false);
   const [toast, setToast] = useState("");
   const [offline, setOffline] = useState(!navigator.onLine);
-  const [recState, setRecState] = useState("idle");
 
   const controllerRef = useRef(null);
-  const recRef = useRef(null);
 
   // Theme Management
   useEffect(() => {
@@ -148,34 +144,6 @@ export default function Search() {
   useEffect(() => {
     if (qParam && qParam !== query) setQuery(qParam);
   }, [qParam]);
-
-  // Web Speech API (Voice Input)
-  const canVoice =
-    typeof window !== "undefined" &&
-    ("webkitSpeechRecognition" in window || "SpeechRecognition" in window);
-
-  const startVoice = () => {
-    if (!canVoice || recState === "listening") return;
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SR();
-    rec.lang = "tr-TR";
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    rec.onresult = (e) => {
-      const text = e.results?.[0]?.[0]?.transcript || "";
-      setQuery((q) => (q ? `${q} ${text}` : text));
-    };
-    rec.onend = () => setRecState("idle");
-    rec.onerror = () => setRecState("idle");
-    recRef.current = rec;
-    setRecState("listening");
-    rec.start();
-  };
-
-  const stopVoice = () => {
-    recRef.current?.stop();
-    setRecState("idle");
-  };
 
   const updateURL = useCallback(
     (cls) => {
@@ -231,11 +199,15 @@ export default function Search() {
     setTimeout(() => setToast(""), 1400);
   };
 
-  const copyLink = async () => {
-    const url = new URL(window.location.href);
-    if (query) url.searchParams.set("q", query);
-    await navigator.clipboard.writeText(url.toString());
-    flash("Bağlantı kopyalandı");
+  // ⬇️ “Bağlantıyı kopyala” yerine PANODAN YAPIŞTIR
+  const pasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) setQuery(text);
+      else flash("Panoda metin yok");
+    } catch {
+      flash("Pano erişimi reddedildi");
+    }
   };
 
   return (
@@ -256,14 +228,10 @@ export default function Search() {
             query={query}
             setQuery={setQuery}
             onKeyDown={onKeyDown}
-            copyLink={copyLink}
             doSearch={doSearch}
             loading={loading}
             offline={offline}
-            canVoice={canVoice}
-            recState={recState}
-            startVoice={startVoice}
-            stopVoice={stopVoice}
+            onPasteClick={pasteFromClipboard}
           />
           <div style={styles.quickRow}>
             <button
@@ -314,14 +282,10 @@ const SearchBar = ({
   query,
   setQuery,
   onKeyDown,
-  copyLink,
   doSearch,
   loading,
   offline,
-  canVoice,
-  recState,
-  startVoice,
-  stopVoice,
+  onPasteClick,
 }) => (
   <div style={styles.searchBarWrap} role="search" className="glass">
     <span className="lead-icon" aria-hidden>
@@ -334,6 +298,7 @@ const SearchBar = ({
       placeholder="Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi…"
       aria-label="Arama"
       style={styles.searchInput}
+      inputMode="search"
     />
     {!!query && (
       <button
@@ -347,11 +312,11 @@ const SearchBar = ({
     )}
     <button
       className="ghost icon"
-      onClick={copyLink}
-      title="Bağlantıyı kopyala"
-      aria-label="Bağlantıyı kopyala"
+      onClick={onPasteClick}
+      title="Panodan yapıştır"
+      aria-label="Panodan yapıştır"
     >
-      <FaRegCopy />
+      <FaRegPaste />
     </button>
     <button
       className={`btn primary ${loading ? "loading" : ""}`}
@@ -362,16 +327,6 @@ const SearchBar = ({
     >
       {loading ? <LoadingDots /> : "Sorgula"}
     </button>
-    {canVoice && (
-      <button
-        className={`ghost icon ${recState === "listening" ? "recording" : ""}`}
-        aria-label={recState === "listening" ? "Dinlemeyi durdur" : "Sesle yaz"}
-        onClick={recState === "listening" ? stopVoice : startVoice}
-        title="Sesle yaz"
-      >
-        <FaMicrophone />
-      </button>
-    )}
   </div>
 );
 
@@ -450,6 +405,21 @@ const PageFooter = () => (
   </footer>
 );
 
+/* ------ Doğrulanan için marka rozeti (logo) ------ */
+function BrandBadgeIcon({ size = 96 }) {
+  const [src, setSrc] = useState("/logo-badge.png"); // /public/logo-badge.png
+  return (
+    <img
+      src={src}
+      onError={() => setSrc("/logo.png")}
+      alt="E-Doğrula"
+      width={size}
+      height={size}
+      style={{ display: "block", width: size, height: size, objectFit: "contain" }}
+    />
+  );
+}
+
 function ResultModal({ children, onClose }) {
   const ref = useRef(null);
   useEffect(() => {
@@ -480,20 +450,19 @@ function ResultCard({ result }) {
   const navigate = useNavigate();
   if (!result) return null;
 
-  const getHeader = (status) => {
-    switch (status) {
+  const header = (() => {
+    switch (result.status) {
       case STATUS.VERIFIED:
-        return { title: "Doğrulanmış İşletme", color: "#27ae60", icon: <IconCheck /> };
+        return { title: "Doğrulanmış İşletme", color: "var(--brand)", icon: <BrandBadgeIcon /> };
       case STATUS.BLACKLIST:
-        return { title: "Olası Dolandırıcı İşletme", color: "#e74c3c", icon: <IconWarn /> };
+        return { title: "Olası Dolandırıcı İşletme", color: "#e74c3c", icon: <FaTriangleExclamation size={34} color="#fff" /> };
       case STATUS.NOT_FOUND:
-        return { title: "Kayıt Bulunamadı", color: "#f39c12", icon: <IconInfo /> };
+        return { title: "Kayıt Bulunamadı", color: "#f39c12", icon: <FaCircleInfo size={34} color="#fff" /> };
       default:
-        return { title: "Bir şeyler ters gitti", color: "#7f8c8d", icon: <IconInfo /> };
+        return { title: "Bir şeyler ters gitti", color: "#7f8c8d", icon: <FaCircleInfo size={34} color="#fff" /> };
     }
-  };
+  })();
 
-  const header = getHeader(result.status);
   const b = result.business || {};
   const slugOrId = b?.slug || b?._id;
 
@@ -504,7 +473,7 @@ function ResultCard({ result }) {
 
   const iconBackground =
     result.status === STATUS.VERIFIED
-      ? "radial-gradient(60px 60px at 50% 50%, #2ecc71 0%, #27ae60 60%)"
+      ? "radial-gradient(60px 60px at 50% 50%, #3bb2e3 0%, #1a81c3 60%)"
       : result.status === STATUS.BLACKLIST
       ? "radial-gradient(60px 60px at 50% 50%, #ff6b6b 0%, #e74c3c 60%)"
       : "radial-gradient(60px 60px at 50% 50%, #f6c25b 0%, #f39c12 60%)";
@@ -608,7 +577,7 @@ function ResultCard({ result }) {
         <div style={{ textAlign: "center", color: "var(--fg-2)", padding: "8px 8px 2px" }}>
           Bu aradığınız işletme veri tabanımızda bulunamadı.
           <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16 }}>
-            <LinkButton to="/apply" color="#27ae60">
+            <LinkButton to="/apply" color="var(--brand)">
               İşletmeni Doğrula
             </LinkButton>
             <LinkButton to="/report" color="#e74c3c">
@@ -657,10 +626,6 @@ function LinkButton({ to, color, children }) {
     </button>
   );
 }
-
-const IconCheck = () => <FaCheck size={34} color="#fff" />;
-const IconWarn = () => <FaTriangleExclamation size={34} color="#fff" />;
-const IconInfo = () => <FaCircleInfo size={34} color="#fff" />;
 
 function LoadingDots() {
   return (
@@ -741,7 +706,7 @@ const styles = {
     borderRadius: 999,
     border: "1px solid transparent",
     background: "transparent",
-    fontSize: 16,
+    fontSize: 16, // ⬅️ iOS odak zoomunu engeller
     outline: "none",
     color: "var(--fg)",
   },
@@ -833,9 +798,9 @@ const styles = {
 };
 
 const globalCSS = `@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap');
-:root { --bg: #ffffff; --card:#ffffffcc; --fg:#202124; --fg-2:#3c4043; --fg-3:#5f6368; --border:#dadce0; --brand:#1a73e8; --muted:#f8f9fa; --warn-bg:#fff5ec; }
-:root[data-theme="dark"]{ --bg: #0b1220; --card:#0f172acc; --fg:#e5e7eb; --fg-2:#cbd5e1; --fg-3:#94a3b8; --border:#24324499; --brand:#8ab4f8; --muted:#142235cc; --warn-bg:#2b1b12; }
-* { box-sizing: border-box; }
+:root { --bg: #ffffff; --card:#ffffffcc; --fg:#202124; --fg-2:#3c4043; --fg-3:#5f6368; --border:#dadce0; --brand:#1a81c3; --muted:#f8f9fa; --warn-bg:#fff5ec; }
+:root[data-theme="dark"]{ --bg: #0b1220; --card:#0f172acc; --fg:#e5e7eb; --fg-2:#cbd5e1; --fg-3:#94a3b8; --border:#24324499; --brand:#1a81c3; --muted:#142235cc; --warn-bg:#2b1b12; }
+* { box-sizing: border-box; -webkit-text-size-adjust: 100%; }
 html, body, #root { height: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); }
 .stack { width: min(680px, 94vw); margin: 0 auto; }
@@ -843,10 +808,10 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .lead-icon { margin-left:8px; display:flex; align-items:center; }
 .lead-icon svg{ width:20px; height:20px; opacity:.9 }
 .btn { transition: all .2s ease; cursor: pointer; }
-.btn.primary { background: linear-gradient(90deg, var(--brand), #5db2ff); color:#fff; font-weight:900; box-shadow: 0 10px 24px rgba(26,115,232,.25); }
+.btn.primary { background: linear-gradient(90deg, var(--brand), #3ba8dc); color:#fff; font-weight:900; box-shadow: 0 10px 24px rgba(26,129,195,.25); }
 .btn.primary:hover { transform: translateY(-1px); }
 .btn.primary.loading { filter: saturate(.7); }
-.btn.success { background: linear-gradient(90deg, #19b56f, #22c55e); color:#fff; }
+.btn.success { background: linear-gradient(90deg, var(--brand), #3ba8dc); color:#fff; }
 .btn.danger  { background: linear-gradient(90deg, #ef4444, #dc2626); color:#fff; }
 .btn.info    { background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
 .btn.subtle  { background: var(--muted); border:1px solid var(--border); }
@@ -858,7 +823,6 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .ghost.icon svg { width:18px; height:18px; }
 .ghost.small { padding:6px 8px; border-radius:999px; font-weight:700; }
 .ghost-pill { border-radius: 999px; padding: 8px 14px; }
-.icon.recording { outline:2px solid #ef4444; }
 .fab { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border-radius: 50%; font-weight: 900; color: #fff; text-decoration: none; box-shadow: 0 12px 28px rgba(0,0,0,.18); }
 .fab.ig { background: linear-gradient(45deg,#fd1d1d,#fcb045); }
 .fab.wa { background: #25D366; }
@@ -871,7 +835,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 .dots i:nth-child(2){ animation-delay:.15s }
 .dots i:nth-child(3){ animation-delay:.3s }
 @keyframes b { 0%,80%,100%{ transform:scale(0.6); opacity:.7 } 40%{ transform:scale(1); opacity:1 } }
-input:focus { outline: none; box-shadow: 0 0 0 3px rgba(26,115,232,.15); }
+/* iOS/Safari odakta zoom’u engelle: tüm form kontrolleri 16px */
+input, textarea, select, button { font-size:16px; }
+input:focus { outline: none; box-shadow: 0 0 0 3px rgba(26,129,195,.15); }
 .foot { color: var(--fg-2); text-decoration: none; font-weight:700; }
 .foot:hover { text-decoration: underline; }
 .howto-icon { width:20px; display:inline-flex; align-items:center; justify-content:center; margin-right:8px; opacity:.9; }
