@@ -16,9 +16,9 @@ import crypto from "crypto";
 import os from "os";
 import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
-import nodemailer from "nodemailer"; // SMTP debug
+import nodemailer from "nodemailer";
 
-// Rota (Route) Dosyaları
+// Routes
 import authRoutes from "./routes/auth.js";
 import businessRoutes from "./routes/business.js";
 import applyRoutes from "./routes/apply.js";
@@ -26,10 +26,10 @@ import reportRoutes from "./routes/report.js";
 import reviewsRoutes from "./routes/reviews.js";
 import exploreRoutes from "./routes/explore.js";
 import adminRoutes from "./routes/admin.js";
-import blacklistRoutes from './routes/blacklist.js';
-import googleRoutes from "./routes/google.js"; // ✅ BURASI YENİ EKLENDİ
+import blacklistRoutes from "./routes/blacklist.js";
+import googleRoutes from "./routes/google.js";
 
-// Model Dosyaları
+// Models
 import User from "./models/User.js";
 
 dotenv.config();
@@ -38,7 +38,7 @@ const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
 
-/* ---------- Guards ---------- */
+/* ---------------- Guards ---------------- */
 if (!process.env.MONGO_URI) {
   console.error("❌ MONGO_URI tanımlı değil. .env dosyanı kontrol et.");
   process.exit(1);
@@ -52,7 +52,7 @@ if (missingMail.length && !isProd) {
   console.warn("ℹ️ Mail env eksik olabilir (dev):", missingMail.join(", "));
 }
 
-/* ---------- Security / Perf ---------- */
+/* ---------------- Security / Perf ---------------- */
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
 app.set("etag", false);
@@ -71,7 +71,7 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(cookieParser());
 app.use(morgan(isProd ? "combined" : "dev"));
 
-/* ---------- CORS ---------- */
+/* ---------------- CORS ---------------- */
 const baseAllowed = [
   "http://localhost:5173",
   "http://127.0.0.1:5173",
@@ -100,7 +100,6 @@ function isPrivateLan(origin) {
     return false;
   }
 }
-
 function isAllowed(origin) {
   if (!origin) return true;
   if (baseAllowed.includes(origin)) return true;
@@ -113,7 +112,6 @@ function isAllowed(origin) {
   if (!isProd && isPrivateLan(origin)) return true;
   return false;
 }
-
 const corsOptions = {
   origin: (origin, cb) => {
     if (isAllowed(origin)) return cb(null, true);
@@ -126,7 +124,7 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
 
-/* ---------- Health/Version ---------- */
+/* ---------------- Health / Version ---------------- */
 const noCache = (_req, res, next) => {
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.set("Pragma", "no-cache");
@@ -145,7 +143,7 @@ app.get("/api/version", noCache, (_req, res) =>
   res.json({ version: process.env.APP_VERSION || "1.0.0", commit: process.env.GIT_COMMIT || null })
 );
 
-/* ---------- Query & URL normalizer ---------- */
+/* ---------------- Query & URL normalizer ---------------- */
 app.use((req, _res, next) => {
   if (req.query && typeof req.query === "object") {
     for (const [k, v] of Object.entries(req.query)) {
@@ -175,11 +173,11 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- UPLOADS kökü ---------- */
+/* ---------------- Paths ---------------- */
 const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads"));
 await fs.mkdir(UPLOADS_ROOT, { recursive: true });
 
-/* ---------- Legacy: /uploads/apply/<folder>/01.jpg → gerçek görsel ---------- */
+/* ---------------- Legacy apply/* mapper ---------------- */
 app.get(/^\/(?:api\/)?uploads\/apply\/([^/]+)\/(\d+)\.jpe?g$/i, async (req, res) => {
   try {
     const folder = req.params[0];
@@ -205,7 +203,7 @@ app.get(/^\/(?:api\/)?uploads\/apply\/([^/]+)\/(\d+)\.jpe?g$/i, async (req, res)
   }
 });
 
-/* ---------- Static /uploads (+ alias) ---------- */
+/* ---------------- Static: /uploads ---------------- */
 const staticOpts = {
   fallthrough: false,
   etag: true,
@@ -219,7 +217,20 @@ const uploadsStatic = express.static(UPLOADS_ROOT, staticOpts);
 app.use("/uploads", uploadsStatic);
 app.use("/api/uploads", uploadsStatic);
 
-/* ---------- JSON mutlak görsel URL ---------- */
+/* ---------------- ✅ Static: /defaults (frontend/public/defaults) ---------------- */
+const DEFAULTS_DIR = path.join(__dirname, "../frontend/public/defaults");
+const defaultsStatic = express.static(DEFAULTS_DIR, {
+  fallthrough: false,
+  etag: true,
+  maxAge: isProd ? "30d" : 0,
+  setHeaders(res) {
+    res.setHeader("Cache-Control", isProd ? "public, max-age=2592000, immutable" : "no-cache");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  },
+});
+app.use("/defaults", defaultsStatic);
+
+/* ---------------- Absolutize JSON media URLs ---------------- */
 const getBaseUrl = (req) =>
   (process.env.PUBLIC_BASE_URL || "").trim() ||
   `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`;
@@ -267,7 +278,7 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------- /api/img (sharp) yalnızca görseller ---------- */
+/* ---------------- /api/img (sharp) ---------------- */
 const IMG_CACHE_DIR = path.join(UPLOADS_ROOT, "_cache");
 await fs.mkdir(IMG_CACHE_DIR, { recursive: true });
 
@@ -355,7 +366,7 @@ app.get("/api/img", async (req, res) => {
   }
 });
 
-/* ---------- Rate Limits ---------- */
+/* ---------------- Rate Limits ---------------- */
 const adminBypass = (req) => {
   const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   if (
@@ -365,7 +376,6 @@ const adminBypass = (req) => {
     return true;
   return false;
 };
-
 const BASE_LIMIT_OPTS = {
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS || "600000", 10),
   standardHeaders: true,
@@ -379,7 +389,6 @@ const BASE_LIMIT_OPTS = {
       .set("Retry-After", "5")
       .json({ success: false, message: "Çok fazla istek. Lütfen birkaç saniye sonra tekrar deneyin." }),
 };
-
 const apiLimiter = rateLimit({ ...BASE_LIMIT_OPTS, max: parseInt(process.env.RATE_LIMIT_MAX || "300", 10) });
 const verifyLimiter = rateLimit({
   ...BASE_LIMIT_OPTS,
@@ -389,23 +398,22 @@ const verifyLimiter = rateLimit({
 app.use("/api/auth/send-code", verifyLimiter);
 app.use("/api", apiLimiter);
 
-/* ---------- Legacy alias ---------- */
+/* ---------------- Legacy alias ---------------- */
 app.use("/api/businesses", (req, res, next) => {
   const m = req.path.match(/^\/([^/]+)\/reviews\/?$/);
   if (m) return res.redirect(307, `/api/reviews/for/${encodeURIComponent(m[1])}`);
   next();
 });
 
-/* ---------- Explore no-cache ---------- */
+/* ---------------- Explore no-cache ---------------- */
 app.use("/api/explore", noCache);
 
-/* ------------------------- Auth helpers ------------------------- */
+/* ---------------- Auth helpers ---------------- */
 const getTokenFromReq = (req) => {
   const hdr = req.headers.authorization || "";
   const bearer = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : null;
   return req.cookies?.token || bearer || null;
 };
-
 function ensureAdmin(req, res, next) {
   if (adminBypass(req)) {
     req.isAdmin = true;
@@ -416,9 +424,7 @@ function ensureAdmin(req, res, next) {
   if (!tok) return res.status(401).json({ success: false, message: "Yetkisiz (token yok)" });
   try {
     const payload = jwt.verify(tok, process.env.JWT_SECRET);
-    if (payload?.role !== "admin") {
-      return res.status(403).json({ success: false, message: "Forbidden (admin gerekli)" });
-    }
+    if (payload?.role !== "admin") return res.status(403).json({ success: false, message: "Forbidden (admin gerekli)" });
     req.isAdmin = true;
     req.admin = { id: payload.id, email: payload.email, method: "jwt" };
     return next();
@@ -427,7 +433,7 @@ function ensureAdmin(req, res, next) {
   }
 }
 
-/* ------------------------------ Debug uçları ------------------------------ */
+/* ---------------- Debug endpoints ---------------- */
 app.post("/api/_debug/smtp-check", noCache, async (_req, res) => {
   try {
     const transporter = nodemailer.createTransport({
@@ -454,25 +460,23 @@ app.post("/api/_debug/smtp-check", noCache, async (_req, res) => {
     return res.status(502).json(payload);
   }
 });
-
 app.post("/api/_debug/ping", (_req, res) => res.json({ success: true, ts: Date.now() }));
 
-/* ------------------------------ Routes ------------------------------ */
+/* ---------------- Routes ---------------- */
 app.use("/api/auth", authRoutes);
 app.use("/api/businesses", businessRoutes);
 app.use("/api/apply", applyRoutes);
 app.use("/api/report", reportRoutes);
 app.use("/api/reviews", reviewsRoutes);
 app.use("/api/explore", exploreRoutes);
-app.use("/api/google", googleRoutes); // ✅ BURASI YENİ EKLENDİ
+app.use("/api/google", googleRoutes);
 app.use("/api/admin", ensureAdmin, adminRoutes);
 app.use("/api/blacklist", blacklistRoutes);
 
-/* ---------- 404 & Error ---------- */
+/* ---------------- 404 & Error ---------------- */
 app.use((req, res) => {
   res.status(404).json({ success: false, message: "Endpoint bulunamadı", path: req.originalUrl });
 });
-
 app.use((err, req, res, _next) => {
   const status = err.status || 500;
   if (!isProd) {
@@ -492,7 +496,7 @@ app.use((err, req, res, _next) => {
   });
 });
 
-/* ---------- Mongo + Admin bootstrap ---------- */
+/* ---------------- Mongo + Bootstrap ---------------- */
 mongoose.set("strictQuery", true);
 mongoose.set("autoIndex", !isProd);
 
