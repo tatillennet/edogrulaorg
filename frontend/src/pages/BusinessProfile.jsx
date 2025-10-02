@@ -20,6 +20,9 @@ function useMedia(query) {
   return matches;
 }
 
+/* --- Google Reviews ayarları (tam yorumlar) --- */
+const GOOGLE_REVIEWS_LIMIT = 50; // tüm yorumları almak için 50 iste
+
 /** Profil sayfası (Pro) */
 export default function BusinessProfile() {
   const { slug } = useParams();
@@ -294,38 +297,50 @@ export default function BusinessProfile() {
   };
 
   /* ---------------- Yorumlar (Google — tamamı) ---------------- */
-  const [gReviews, setGReviews] = useState({ rating: null, count: 0, reviews: [] });
+  const [gReviews, setGReviews] = useState({ rating: null, count: 0, reviews: [], _mode: undefined });
   const [revLoading, setRevLoading] = useState(false);
   const [reviewMode, setReviewMode] = useState("scroll"); // "scroll" | "list"
 
   useEffect(() => {
     if (!b) return;
     let mounted = true;
+
     (async () => {
       try {
         setRevLoading(true);
-        const gUrls = [
-          b?.googlePlaceId
-            ? `/api/google/reviews?placeId=${b.googlePlaceId}`
-            : null,
-          `/api/google/reviews/search?query=${encodeURIComponent(name + " " + (city || ""))}`,
-        ].filter(Boolean);
 
-        for (const p of gUrls) {
+        // Önce placeId varsa onu dene; yoksa arama
+        const reqs = [];
+        if (b?.googlePlaceId) {
+          reqs.push(
+            http.get("/api/google/reviews", {
+              params: { placeId: b.googlePlaceId, limit: GOOGLE_REVIEWS_LIMIT },
+            })
+          );
+        }
+        reqs.push(
+          http.get("/api/google/reviews/search", {
+            params: { query: `${name} ${city || ""}`.trim(), limit: GOOGLE_REVIEWS_LIMIT },
+          })
+        );
+
+        for (const req of reqs) {
           try {
-            const { data } = await http.get(p);
+            const { data } = await req;
             const got = normalizeGoogleReviews(data);
-            if (got) {
-              if (!mounted) return;
+            if (got && mounted) {
               setGReviews(got);
               break;
             }
-          } catch {}
+          } catch {
+            // bu isteği es geçip bir sonrakine geçiyoruz
+          }
         }
       } finally {
         if (mounted) setRevLoading(false);
       }
     })();
+
     return () => { mounted = false; };
   }, [b, http, name, city]);
 
@@ -404,7 +419,7 @@ export default function BusinessProfile() {
               onError={onLogoError}
               alt="E-Doğrula"
               style={{
-                height: isMobile ? 40 : 56, // büyütüldü
+                height: isMobile ? 40 : 56,
                 objectFit: "contain",
                 aspectRatio: "auto",
                 filter: "drop-shadow(0 1px 1px rgba(0,0,0,.08))",
@@ -502,6 +517,7 @@ export default function BusinessProfile() {
                 city={city}
                 placeId={b?.googlePlaceId}
                 mode={reviewMode}
+                backendMode={gReviews._mode}
                 onToggleMode={() => setReviewMode(m => (m === "scroll" ? "list" : "scroll"))}
               />
               {revLoading ? (
@@ -716,7 +732,7 @@ function MapDisplay({ apiKey, yandexKey, lat, lng, businessName, address }) {
 }
 
 /* ---------------- Google başlık + tüm yorumlar ---------------- */
-function GoogleHeaderBar({ rating, count, businessName, city, placeId, mode, onToggleMode }) {
+function GoogleHeaderBar({ rating, count, businessName, city, placeId, mode, onToggleMode, backendMode }) {
   const writeReviewUrl = placeId
     ? `https://search.google.com/local/writereview?placeid=${placeId}`
     : `https://www.google.com/search?q=${encodeURIComponent(businessName + " " + (city || "") + " yorum yaz")}`;
@@ -735,6 +751,11 @@ function GoogleHeaderBar({ rating, count, businessName, city, placeId, mode, onT
           <span style={{ opacity: .8, fontSize: 14 }}>
             Yorum sayısı {c} (72 saatte bir yenilenir)
           </span>
+          {backendMode === "legacy" && (
+            <span style={{ fontSize: 12, color: "#a16207", fontWeight: 700 }}>
+              • API fallback
+            </span>
+          )}
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -928,23 +949,48 @@ function DateRangePicker({ value, onChange }) {
 
 /* ---------------- Yardımcılar ---------------- */
 function normalizeGoogleReviews(data) {
-  if (!data) return { rating: null, count: 0, reviews: [] };
-  const rating = Number(
-    data.rating ?? data.averageRating ?? data.result?.rating
+  // Backend "new" mod ise: { success, place:{...}, reviews:[...], mode:"new", totalReturned }
+  // Legacy mod ise farklı alan adları dönebilir.
+  if (!data) return { rating: null, count: 0, reviews: [], _mode: undefined };
+
+  const place = data.place || data.result || {};
+  const rating = (
+    Number(place.rating ?? data.rating ?? data.averageRating) || null
   );
-  const count =
-    Number(data.count ?? data.userRatingsTotal ?? data.result?.count) ||
-    (data.reviews?.length || 0);
-  const arr = data.reviews || data.result?.reviews || [];
-  const reviews = arr.map((r) => ({
-    author: r.author_name || r.author || r.user || "Kullanıcı",
-    text: r.text || r.comment || "",
+
+  let count =
+    Number(
+      place.count ??
+      place.userRatingCount ??
+      place.user_ratings_total ??
+      data.count ??
+      data.userRatingsTotal
+    ) || 0;
+
+  const rawReviews =
+    data.reviews ||
+    place.reviews ||
+    data.result?.reviews ||
+    [];
+
+  if (!count && Array.isArray(rawReviews)) count = rawReviews.length;
+
+  const reviews = rawReviews.map((r) => ({
+    author:
+      r.author ||
+      r.author_name ||
+      r.user ||
+      r.authorAttribution?.displayName ||
+      "Kullanıcı",
+    text: r.text?.text ?? r.text ?? r.comment ?? "",
     rating: Number(r.rating || r.stars || 0),
-    date: r.time
-      ? new Date(r.time * 1000).toISOString()
-      : r.date || r.createdAt || null,
+    date:
+      r.publishTime ||
+      (r.time ? new Date(r.time * 1000).toISOString() : r.date || r.createdAt || null),
+    authorUrl: r.authorAttribution?.uri || r.author_url || undefined,
+    authorPhoto: r.authorAttribution?.photoUri || r.profile_photo_url || undefined,
   }));
-  return { rating, count, reviews };
+  return { rating, count, reviews, _mode: data.mode };
 }
 function round1(n) { return Math.round(n * 10) / 10; }
 function slugToTitle(s) {
