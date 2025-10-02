@@ -3,500 +3,659 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import axios from "axios";
 import { createPortal } from "react-dom";
-import { useLocation, useNavigate, Link } from "react-router-dom"; // Link'i import et
+import { useLocation, useNavigate, Link } from "react-router-dom";
 import {
-  FaInstagram,
-  FaWhatsapp,
-  FaMagnifyingGlass,
-  FaXmark,
-  FaMicrophone,
-  FaRegCopy,
-  FaTag,
-  FaPhone,
-  FaGlobe,
-  FaLocationDot,
-  FaCheck,
-  FaTriangleExclamation,
-  FaCircleInfo,
-  FaLink,
+  FaInstagram,
+  FaWhatsapp,
+  FaMagnifyingGlass,
+  FaXmark,
+  FaMicrophone,
+  FaRegCopy,
+  FaTag,
+  FaPhone,
+  FaGlobe,
+  FaLocationDot,
+  FaCheck,
+  FaTriangleExclamation,
+  FaCircleInfo,
+  FaLink,
 } from "react-icons/fa6";
 
 /* ================== CONSTANTS ================== */
-const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
+const API_BASE_RAW = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
+// VITE_API_URL '/api' ile gelmişse köke indir (çift /api engeli)
+const API_ROOT = API_BASE_RAW.replace(/\/api(?:\/v\d+)?$/i, "");
 const STATUS = {
-  VERIFIED: "verified",
-  BLACKLIST: "blacklist",
-  NOT_FOUND: "not_found",
-  ERROR: "error",
+  VERIFIED: "verified",
+  BLACKLIST: "blacklist",
+  NOT_FOUND: "not_found",
+  ERROR: "error",
 };
 
 /* ================== API INSTANCE ================== */
 const api = axios.create({
-  baseURL: API_BASE || undefined,
-  withCredentials: true,
-  timeout: 12000,
-  headers: { Accept: "application/json" },
+  baseURL: API_ROOT || undefined,
+  withCredentials: true,
+  timeout: 12000,
+  headers: { Accept: "application/json" },
 });
 
 /* ================== HELPER FUNCTIONS ================== */
 function normalizePhoneTR(raw) {
-  const digits = String(raw || "").replace(/\D/g, "");
-  if (!digits) return "";
-  if (digits.startsWith("90")) return `+${digits}`;
-  if (digits.startsWith("0")) return `+90${digits.slice(1)}`;
-  if (digits.length === 10) return `+90${digits}`;
-  if (digits.startsWith("9") && digits.length === 12) return `+${digits}`;
-  return `+${digits}`;
+  const digits = String(raw || "").replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.startsWith("90")) return `+${digits}`;
+  if (digits.startsWith("0")) return `+90${digits.slice(1)}`;
+  if (digits.length === 10) return `+90${digits}`;
+  if (digits.startsWith("9") && digits.length === 12) return `+${digits}`;
+  return `+${digits}`;
 }
+const looksLikePhoneDigits = (s) => {
+  const d = String(s || "").replace(/\D/g, "");
+  return d.length >= 10 && d.length <= 13;
+};
+const isIgHandle = (s) =>
+  /^[a-z0-9._]{1,30}$/i.test(s) && /[a-z]/i.test(s); // en az bir harf şartı -> @0543... telefon sanılsın
 
 function classifyQuery(raw) {
-  const q = String(raw || "").trim();
-  if (!q) return { ok: false, reason: "empty" };
+  const q = String(raw || "").trim();
+  if (!q) return { ok: false, reason: "empty" };
 
-  const igUrlRe = /^(https?:\/\/)?(www\.)?(instagram\.com|instagr\.am)\/([A-Za-z0-9._]{1,30})(\/)?(\?.*)?$/i;
-  const igUserRe = /^@?([A-Za-z0-9._]{1,30})$/;
-  const phoneRe = /^\+?[0-9 ()\-\.]{10,20}$/;
-  const siteRe = /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}([:\/?#].*)?$/i;
+  const noAt = q.replace(/^@+/, ""); // baştaki @ sadece görsel; sınıflandırmada dikkate alma
 
-  if (igUrlRe.test(q)) {
-    const username = q.replace(igUrlRe, "$4");
-    const pretty = `https://instagram.com/${username}`;
-    return { ok: true, type: "ig_url", value: pretty, username, pretty };
-  }
-  if (igUserRe.test(q)) {
-    const username = q.replace(/^@/, "");
-    return { ok: true, type: "ig_username", value: username, username, pretty: `@${username}` };
-  }
-  if (siteRe.test(q)) {
-    const url = /^https?:\/\//i.test(q) ? q : `https://${q}`;
-    return { ok: true, type: "website", value: url, pretty: url };
-  }
-  if (phoneRe.test(q)) {
-    const e164 = normalizePhoneTR(q);
-    return { ok: true, type: "phone", value: e164, pretty: e164 };
-  }
-  return {
-    ok: false,
-    reason: "Lütfen Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi girin.",
-  };
+  // 1) Instagram URL
+  const igUrlRe =
+    /^(https?:\/\/)?(www\.)?(instagram\.com|instagr\.am)\/([A-Za-z0-9._]{1,30})(\/)?(\?.*)?$/i;
+  if (igUrlRe.test(noAt)) {
+    const username = noAt.replace(igUrlRe, "$4");
+    const pretty = `https://instagram.com/${username}`;
+    return { ok: true, type: "ig_url", value: username, username, pretty };
+  }
+
+  // 2) Telefon (başındaki '@' silinse bile)
+  if (looksLikePhoneDigits(noAt)) {
+    const e164 = normalizePhoneTR(noAt);
+    return { ok: true, type: "phone", value: e164, pretty: e164 };
+  }
+
+  // 3) Domain/Website
+  const siteRe = /^(https?:\/\/)?([a-z0-9-]+\.)+[a-z]{2,}([:\/?#].*)?$/i;
+  if (siteRe.test(noAt)) {
+    const url = /^https?:\/\//i.test(noAt) ? noAt : `https://${noAt}`;
+    let host = noAt;
+    try {
+      host = new URL(url).hostname.replace(/^www\./i, "");
+    } catch {}
+    // Backend'e host gönder, kullanıcıya güzel URL göster
+    return { ok: true, type: "website", value: host, pretty: url };
+  }
+
+  // 4) Instagram kullanıcı adı (en az bir harf içeren)
+  if (isIgHandle(noAt)) {
+    return { ok: true, type: "ig_username", value: noAt, username: noAt, pretty: `@${noAt}` };
+  }
+
+  return {
+    ok: false,
+    reason:
+      "Lütfen Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi girin.",
+  };
 }
 
 function useQueryQ() {
-  const loc = useLocation();
-  return new URLSearchParams(loc.search).get("q") || "";
+  const loc = useLocation();
+  return new URLSearchParams(loc.search).get("q") || "";
 }
 
 /* ================== MAIN PAGE COMPONENT ================== */
 export default function Search() {
-  const navigate = useNavigate();
-  const qParam = useQueryQ();
+  const navigate = useNavigate();
+  const qParam = useQueryQ();
 
-  const [query, setQuery] = useState(qParam);
-  const [result, setResult] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [showModal, setShowModal] = useState(false);
-  const [toast, setToast] = useState("");
-  const [offline, setOffline] = useState(!navigator.onLine);
-  const [recState, setRecState] = useState("idle");
+  const [query, setQuery] = useState(qParam);
+  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+  const [toast, setToast] = useState("");
+  const [offline, setOffline] = useState(!navigator.onLine);
+  const [recState, setRecState] = useState("idle");
 
-  const controllerRef = useRef(null);
-  const recRef = useRef(null);
+  const controllerRef = useRef(null);
+  const recRef = useRef(null);
 
-  // Theme Management
-  useEffect(() => {
-    const saved = localStorage.getItem("theme") || "light";
-    const root = document.documentElement;
-    const sysDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
-    const mode = saved === "system" ? (sysDark ? "dark" : "light") : saved;
-    root.dataset.theme = mode;
-  }, []);
+  // Theme Management
+  useEffect(() => {
+    const saved = localStorage.getItem("theme") || "light";
+    const root = document.documentElement;
+    const sysDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+    const mode = saved === "system" ? (sysDark ? "dark" : "light") : saved;
+    root.dataset.theme = mode;
+  }, []);
 
-  // Offline/Online Status
-  useEffect(() => {
-    const on = () => setOffline(false);
-    const off = () => setOffline(true);
-    window.addEventListener("online", on);
-    window.addEventListener("offline", off);
-    return () => {
-      window.removeEventListener("online", on);
-      window.removeEventListener("offline", off);
-    };
-  }, []);
+  // Offline/Online Status
+  useEffect(() => {
+    const on = () => setOffline(false);
+    const off = () => setOffline(true);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, []);
 
-  // Sync URL query param with state
-  useEffect(() => {
-    if (qParam && qParam !== query) setQuery(qParam);
-  }, [qParam]);
+  // Sync URL query param with state
+  useEffect(() => {
+    if (qParam && qParam !== query) setQuery(qParam);
+  }, [qParam]);
 
-  // Web Speech API (Voice Input)
-  const canVoice = typeof window !== "undefined" && ("webkitSpeechRecognition" in window || "SpeechRecognition" in window);
+  // Web Speech API (Voice Input)
+  const canVoice =
+    typeof window !== "undefined" &&
+    ("webkitSpeechRecognition" in window || "SpeechRecognition" in window);
 
-  const startVoice = () => {
-    if (!canVoice || recState === "listening") return;
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const rec = new SR();
-    rec.lang = "tr-TR";
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    rec.onresult = (e) => {
-      const text = e.results?.[0]?.[0]?.transcript || "";
-      setQuery((q) => (q ? `${q} ${text}` : text));
-    };
-    rec.onend = () => setRecState("idle");
-    rec.onerror = () => setRecState("idle");
-    recRef.current = rec;
-    setRecState("listening");
-    rec.start();
-  };
+  const startVoice = () => {
+    if (!canVoice || recState === "listening") return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    rec.lang = "tr-TR";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e) => {
+      const text = e.results?.[0]?.[0]?.transcript || "";
+      setQuery((q) => (q ? `${q} ${text}` : text));
+    };
+    rec.onend = () => setRecState("idle");
+    rec.onerror = () => setRecState("idle");
+    recRef.current = rec;
+    setRecState("listening");
+    rec.start();
+  };
 
-  const stopVoice = () => {
-    recRef.current?.stop();
-    setRecState("idle");
-  };
+  const stopVoice = () => {
+    recRef.current?.stop();
+    setRecState("idle");
+  };
 
-  const updateURL = useCallback(
-    (cls) => {
-      const pretty = cls.pretty || cls.value;
-      navigate({ search: `?q=${encodeURIComponent(pretty)}` }, { replace: true });
-    },
-    [navigate]
-  );
+  const updateURL = useCallback(
+    (cls) => {
+      const pretty = cls.pretty || cls.value;
+      navigate({ search: `?q=${encodeURIComponent(pretty)}` }, { replace: true });
+    },
+    [navigate]
+  );
 
-  const doSearch = useCallback(
-    async (raw) => {
-      const cls = classifyQuery(raw ?? query);
-      if (!cls.ok) {
-        setResult({ status: STATUS.ERROR });
-        setShowModal(true);
-        return;
-      }
-      updateURL(cls);
+  const doSearch = useCallback(
+    async (raw) => {
+      const cls = classifyQuery(raw ?? query);
+      if (!cls.ok) {
+        setResult({ status: STATUS.ERROR });
+        setShowModal(true);
+        return;
+      }
+      updateURL(cls);
 
-      controllerRef.current?.abort?.();
-      controllerRef.current = new AbortController();
+      controllerRef.current?.abort?.();
+      controllerRef.current = new AbortController();
 
-      try {
-        setLoading(true);
-        const { data } = await api.get("/api/businesses/search", {
-          params: { q: cls.value, type: cls.type },
-          signal: controllerRef.current.signal,
-        });
-        setResult(data && typeof data === "object" ? data : { status: STATUS.ERROR });
-        setShowModal(true);
-      } catch (e) {
-        if (axios.isCancel?.(e)) return;
-        setResult({ status: STATUS.ERROR });
-        setShowModal(true);
-      } finally {
-        setLoading(false);
-      }
-    },
-    [query, updateURL]
-  );
+      try {
+        setLoading(true);
+        const { data } = await api.get(
+          "/api/businesses/search", // baseURL kökte; burada /api ile daima doğru
+          {
+            params: { q: cls.value, type: cls.type },
+            signal: controllerRef.current.signal,
+          }
+        );
+        setResult(data && typeof data === "object" ? data : { status: STATUS.ERROR });
+        setShowModal(true);
+      } catch (e) {
+        if (axios.isCancel?.(e)) return;
+        setResult({ status: STATUS.ERROR });
+        setShowModal(true);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [query, updateURL]
+  );
 
-  useEffect(() => {
-    return () => controllerRef.current?.abort?.();
-  }, []);
+  useEffect(() => {
+    return () => controllerRef.current?.abort?.();
+  }, []);
 
-  const onKeyDown = (e) => e.key === "Enter" && doSearch();
+  const onKeyDown = (e) => e.key === "Enter" && doSearch();
 
-  const flash = (m) => {
-    setToast(m);
-    setTimeout(() => setToast(""), 1400);
-  };
+  const flash = (m) => {
+    setToast(m);
+    setTimeout(() => setToast(""), 1400);
+  };
 
-  const copyLink = async () => {
-    const url = new URL(window.location.href);
-    if (query) url.searchParams.set("q", query);
-    await navigator.clipboard.writeText(url.toString());
-    flash("Bağlantı kopyalandı");
-  };
+  const copyLink = async () => {
+    const url = new URL(window.location.href);
+    if (query) url.searchParams.set("q", query);
+    await navigator.clipboard.writeText(url.toString());
+    flash("Bağlantı kopyalandı");
+  };
 
-  return (
-    <div style={styles.page}>
-      <style>{globalCSS}</style>
-      <PageHeader navigate={navigate} />
+  return (
+    <div style={styles.page}>
+      <style>{globalCSS}</style>
+      <PageHeader navigate={navigate} />
 
-      {offline && (
-        <div role="status" style={styles.offline}>
-          Şu an çevrimdışısın — sonuçlar güncellenemeyebilir.
-        </div>
-      )}
+      {offline && (
+        <div role="status" style={styles.offline}>
+          Şu an çevrimdışısın — sonuçlar güncellenemeyebilir.
+        </div>
+      )}
 
-      <main style={styles.center}>
-        <img src="/logo.png" alt="E-Doğrula" style={styles.logo} />
-        <div className="stack">
-          <SearchBar
-            query={query}
-            setQuery={setQuery}
-            onKeyDown={onKeyDown}
-            copyLink={copyLink}
-            doSearch={doSearch}
-            loading={loading}
-            offline={offline}
-            canVoice={canVoice}
-            recState={recState}
-            startVoice={startVoice}
-            stopVoice={stopVoice}
-          />
-          <div style={styles.quickRow}>
-            <button
-              className="ghost-pill"
-              onClick={() => navigate("/sapanca-bungalov-evleri")}
-              title="Sapanca bungalov evleri"
-            >
-              Sapanca bungalov evleri
-            </button>
-          </div>
-        </div>
-        <HowToUseCard />
-      </main>
+      <main style={styles.center}>
+        <img src="/logo.png" alt="E-Doğrula" style={styles.logo} />
+        <div className="stack">
+          <SearchBar
+            query={query}
+            setQuery={setQuery}
+            onKeyDown={onKeyDown}
+            copyLink={copyLink}
+            doSearch={doSearch}
+            loading={loading}
+            offline={offline}
+            canVoice={canVoice}
+            recState={recState}
+            startVoice={startVoice}
+            stopVoice={stopVoice}
+          />
+          <div style={styles.quickRow}>
+            <button
+              className="ghost-pill"
+              onClick={() => navigate("/sapanca-bungalov-evleri")}
+              title="Sapanca bungalov evleri"
+            >
+              Sapanca bungalov evleri
+            </button>
+          </div>
+        </div>
+        <HowToUseCard />
+      </main>
 
-      <PageFooter />
+      <PageFooter />
 
-      {toast && (
-        <div style={styles.toast} className="glass" role="status">
-          {toast}
-        </div>
-      )}
+      {toast && (
+        <div style={styles.toast} className="glass" role="status">
+          {toast}
+        </div>
+      )}
 
-      {showModal && (
-        <ResultModal onClose={() => setShowModal(false)}>
-          <ResultCard result={result} />
-        </ResultModal>
-      )}
-    </div>
-  );
+      {showModal && (
+        <ResultModal onClose={() => setShowModal(false)}>
+          <ResultCard result={result} />
+        </ResultModal>
+      )}
+    </div>
+  );
 }
 
 /* ================== SUB-COMPONENTS ================== */
 const PageHeader = ({ navigate }) => (
-  <nav style={styles.navWrap} aria-label="Üst menü">
-    <div style={styles.navSpacer} />
-    <div style={styles.navRight}>
-      <button className="link ghost-pill" onClick={() => navigate("/apply")}>
-        İşletmeni doğrula
-      </button>
-      <button className="link ghost-pill" onClick={() => navigate("/report")}>
-        Şikayet et / Rapor et
-      </button>
-    </div>
-  </nav>
+  <nav style={styles.navWrap} aria-label="Üst menü">
+    <div style={styles.navSpacer} />
+    <div style={styles.navRight}>
+      <button className="link ghost-pill" onClick={() => navigate("/apply")}>
+        İşletmeni doğrula
+      </button>
+      <button className="link ghost-pill" onClick={() => navigate("/report")}>
+        Şikayet et / Rapor et
+      </button>
+    </div>
+  </nav>
 );
 
-const SearchBar = ({ query, setQuery, onKeyDown, copyLink, doSearch, loading, offline, canVoice, recState, startVoice, stopVoice }) => (
-  <div style={styles.searchBarWrap} role="search" className="glass">
-    <span className="lead-icon" aria-hidden><FaMagnifyingGlass /></span>
-    <input
-      value={query}
-      onChange={(e) => setQuery(e.target.value)}
-      onKeyDown={onKeyDown}
-      placeholder="Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi…"
-      aria-label="Arama"
-      style={styles.searchInput}
-    />
-    {!!query && (
-      <button className="ghost icon" aria-label="Temizle" onClick={() => setQuery("")} title="Temizle">
-        <FaXmark />
-      </button>
-    )}
-    <button className="ghost icon" onClick={copyLink} title="Bağlantıyı kopyala" aria-label="Bağlantıyı kopyala">
-      <FaRegCopy />
-    </button>
-    <button
-      className={`btn primary ${loading ? "loading" : ""}`}
-      onClick={() => doSearch()}
-      disabled={loading || offline}
-      aria-busy={loading}
-      style={styles.searchBtn}
-    >
-      {loading ? <LoadingDots /> : "Sorgula"}
-    </button>
-    {canVoice && (
-      <button
-        className={`ghost icon ${recState === "listening" ? "recording" : ""}`}
-        aria-label={recState === "listening" ? "Dinlemeyi durdur" : "Sesle yaz"}
-        onClick={recState === "listening" ? stopVoice : startVoice}
-        title="Sesle yaz"
-      >
-        <FaMicrophone />
-      </button>
-    )}
-  </div>
+const SearchBar = ({
+  query,
+  setQuery,
+  onKeyDown,
+  copyLink,
+  doSearch,
+  loading,
+  offline,
+  canVoice,
+  recState,
+  startVoice,
+  stopVoice,
+}) => (
+  <div style={styles.searchBarWrap} role="search" className="glass">
+    <span className="lead-icon" aria-hidden>
+      <FaMagnifyingGlass />
+    </span>
+    <input
+      value={query}
+      onChange={(e) => setQuery(e.target.value)} // ❗ otomatik '@' EKLEMİYORUZ
+      onKeyDown={onKeyDown}
+      placeholder="Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi…"
+      aria-label="Arama"
+      style={styles.searchInput}
+    />
+    {!!query && (
+      <button
+        className="ghost icon"
+        aria-label="Temizle"
+        onClick={() => setQuery("")}
+        title="Temizle"
+      >
+        <FaXmark />
+      </button>
+    )}
+    <button
+      className="ghost icon"
+      onClick={copyLink}
+      title="Bağlantıyı kopyala"
+      aria-label="Bağlantıyı kopyala"
+    >
+      <FaRegCopy />
+    </button>
+    <button
+      className={`btn primary ${loading ? "loading" : ""}`}
+      onClick={() => doSearch()}
+      disabled={loading || offline}
+      aria-busy={loading}
+      style={styles.searchBtn}
+    >
+      {loading ? <LoadingDots /> : "Sorgula"}
+    </button>
+    {canVoice && (
+      <button
+        className={`ghost icon ${recState === "listening" ? "recording" : ""}`}
+        aria-label={recState === "listening" ? "Dinlemeyi durdur" : "Sesle yaz"}
+        onClick={recState === "listening" ? stopVoice : startVoice}
+        title="Sesle yaz"
+      >
+        <FaMicrophone />
+      </button>
+    )}
+  </div>
 );
 
 const HowToUseCard = () => (
-  <section style={styles.howtoCard} className="glass" aria-labelledby="howto-title">
-    <header style={styles.howtoHeader} id="howto-title">E-Doğrula nasıl kullanılır?</header>
-    <ul style={styles.howtoList}>
-      <li><span className="howto-icon"><FaInstagram /></span>Instagram kullanıcı adı yazın: <code>@edogrula</code> veya <code>edogrula</code></li>
-      <li><span className="howto-icon"><FaLink /></span>Instagram profil linki girin: <code>https://instagram.com/edogrula</code></li>
-      <li><span className="howto-icon"><FaPhone /></span>Telefon yazın: <code>+905069990554</code></li>
-      <li><span className="howto-icon"><FaGlobe /></span>Web sitesi yazın: <code>edogrula.org</code> veya <code>https://edogrula.org</code></li>
-    </ul>
-  </section>
+  <section style={styles.howtoCard} className="glass" aria-labelledby="howto-title">
+    <header style={styles.howtoHeader} id="howto-title">
+      E-Doğrula nasıl kullanılır?
+    </header>
+    <ul style={styles.howtoList}>
+      <li>
+        <span className="howto-icon">
+          <FaInstagram />
+        </span>
+        Instagram kullanıcı adı yazın: <code>@edogrula</code> veya <code>edogrula</code>
+      </li>
+      <li>
+        <span className="howto-icon">
+          <FaLink />
+        </span>
+        Instagram profil linki girin: <code>https://instagram.com/edogrula</code>
+      </li>
+      <li>
+        <span className="howto-icon">
+          <FaPhone />
+        </span>
+        Telefon yazın: <code>+905069990554</code>
+      </li>
+      <li>
+        <span className="howto-icon">
+          <FaGlobe />
+        </span>
+        Web sitesi yazın: <code>edogrula.org</code> veya <code>https://edogrula.org</code>
+      </li>
+    </ul>
+  </section>
 );
 
 const PageFooter = () => (
-  <footer style={styles.footer} aria-label="Alt menü">
-    <div style={styles.footerLeft} className="glass">
-      <a className="foot" href="/kvkk">kvkk</a>
-      <a className="foot" href="/gizlilik">gizlilik sözleşmesi</a>
-      <a className="foot" href="/hakkimizda">hakkımızda</a>
-      <a className="foot" href="/kariyer">kariyer / iş birliği</a>
-    </div>
-    <div style={styles.footerRight}>
-      <a href="https://instagram.com/edogrula" target="_blank" rel="noreferrer noopener" className="fab ig" aria-label="Instagram" title="Instagram">
-        <FaInstagram />
-      </a>
-      <a href="https://wa.me/905069990554" target="_blank" rel="noreferrer noopener" className="fab wa" aria-label="WhatsApp" title="WhatsApp">
-        <FaWhatsapp />
-      </a>
-    </div>
-  </footer>
+  <footer style={styles.footer} aria-label="Alt menü">
+    <div style={styles.footerLeft} className="glass">
+      <a className="foot" href="/kvkk">
+        kvkk
+      </a>
+      <a className="foot" href="/gizlilik">
+        gizlilik sözleşmesi
+      </a>
+      <a className="foot" href="/hakkimizda">
+        hakkımızda
+      </a>
+      <a className="foot" href="/kariyer">
+        kariyer / iş birliği
+      </a>
+    </div>
+    <div style={styles.footerRight}>
+      <a
+        href="https://instagram.com/edogrula"
+        target="_blank"
+        rel="noreferrer noopener"
+        className="fab ig"
+        aria-label="Instagram"
+        title="Instagram"
+      >
+        <FaInstagram />
+      </a>
+      <a
+        href="https://wa.me/905069990554"
+        target="_blank"
+        rel="noreferrer noopener"
+        className="fab wa"
+        aria-label="WhatsApp"
+        title="WhatsApp"
+      >
+        <FaWhatsapp />
+      </a>
+    </div>
+  </footer>
 );
 
 function ResultModal({ children, onClose }) {
-  const ref = useRef(null);
-  useEffect(() => {
-    const prev = document.activeElement;
-    ref.current?.focus();
-    const onEsc = (e) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onEsc);
-    return () => {
-      window.removeEventListener("keydown", onEsc);
-      prev?.focus();
-    };
-  }, [onClose]);
+  const ref = useRef(null);
+  useEffect(() => {
+    const prev = document.activeElement;
+    ref.current?.focus();
+    const onEsc = (e) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onEsc);
+    return () => {
+      window.removeEventListener("keydown", onEsc);
+      prev?.focus();
+    };
+  }, [onClose]);
 
-  return createPortal(
-    <div onMouseDown={(e) => e.target === e.currentTarget && onClose()} style={styles.overlay}>
-      <div role="dialog" aria-modal="true" tabIndex={-1} ref={ref} style={styles.modal} className="glass modal">
-        <button onClick={onClose} aria-label="Kapat" className="btn subtle close-x"><FaXmark /></button>
-        {children}
-      </div>
-    </div>,
-    document.body
-  );
+  return createPortal(
+    <div onMouseDown={(e) => e.target === e.currentTarget && onClose()} style={styles.overlay}>
+      <div role="dialog" aria-modal="true" tabIndex={-1} ref={ref} style={styles.modal} className="glass modal">
+        <button onClick={onClose} aria-label="Kapat" className="btn subtle close-x">
+          <FaXmark />
+        </button>
+        {children}
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 function ResultCard({ result }) {
-  const navigate = useNavigate();
-  if (!result) return null;
+  const navigate = useNavigate();
+  if (!result) return null;
 
-  const getHeader = (status) => {
-    switch (status) {
-      case STATUS.VERIFIED:
-        return { title: "Doğrulanmış İşletme", color: "#27ae60", icon: <IconCheck /> };
-      case STATUS.BLACKLIST:
-        return { title: "Olası Dolandırıcı İşletme", color: "#e74c3c", icon: <IconWarn /> };
-      case STATUS.NOT_FOUND:
-        return { title: "Kayıt Bulunamadı", color: "#f39c12", icon: <IconInfo /> };
-      default:
-        return { title: "Bir şeyler ters gitti", color: "#7f8c8d", icon: <IconInfo /> };
-    }
-  };
+  const getHeader = (status) => {
+    switch (status) {
+      case STATUS.VERIFIED:
+        return { title: "Doğrulanmış İşletme", color: "#27ae60", icon: <IconCheck /> };
+      case STATUS.BLACKLIST:
+        return { title: "Olası Dolandırıcı İşletme", color: "#e74c3c", icon: <IconWarn /> };
+      case STATUS.NOT_FOUND:
+        return { title: "Kayıt Bulunamadı", color: "#f39c12", icon: <IconInfo /> };
+      default:
+        return { title: "Bir şeyler ters gitti", color: "#7f8c8d", icon: <IconInfo /> };
+    }
+  };
 
-  const header = getHeader(result.status);
-  const b = result.business || {};
-  const slugOrId = b?.slug || b?._id;
+  const header = getHeader(result.status);
+  const b = result.business || {};
+  const slugOrId = b?.slug || b?._id;
 
-  // ✅✅✅ BURASI ULTRA PRO GÜNCELLEMESİ ✅✅✅
-  // İşletmenin durumuna göre doğru profil URL'sini belirle
-  const profileUrl = result.status === STATUS.BLACKLIST
-    ? `/kara-liste/${slugOrId}`
-    : `/isletme/${slugOrId}`;
+  const profileUrl =
+    result.status === STATUS.BLACKLIST ? `/kara-liste/${slugOrId}` : `/isletme/${slugOrId}`;
 
-  const canOpenProfile = Boolean(slugOrId);
-  
-  const iconBackground = result.status === STATUS.VERIFIED
-    ? "radial-gradient(60px 60px at 50% 50%, #2ecc71 0%, #27ae60 60%)"
-    : result.status === STATUS.BLACKLIST
-    ? "radial-gradient(60px 60px at 50% 50%, #ff6b6b 0%, #e74c3c 60%)"
-    : "radial-gradient(60px 60px at 50% 50%, #f6c25b 0%, #f39c12 60%)";
+  const canOpenProfile = Boolean(slugOrId);
 
-  return (
-    <div>
-      <div style={{ textAlign: "center", marginTop: 8, marginBottom: 12 }}>
-        <div style={{ ...styles.resultIcon, background: iconBackground }}>{header.icon}</div>
-        <h2 style={{ fontSize: 24, fontWeight: 900, color: header.color, margin: 0 }}>{header.title}</h2>
-      </div>
+  const iconBackground =
+    result.status === STATUS.VERIFIED
+      ? "radial-gradient(60px 60px at 50% 50%, #2ecc71 0%, #27ae60 60%)"
+      : result.status === STATUS.BLACKLIST
+      ? "radial-gradient(60px 60px at 50% 50%, #ff6b6b 0%, #e74c3c 60%)"
+      : "radial-gradient(60px 60px at 50% 50%, #f6c25b 0%, #f39c12 60%)";
 
-      {result.status === STATUS.VERIFIED && (
-        <div style={styles.verifiedRow}>
-          <div style={styles.verifiedLeft}>
-            <div style={{ padding: "6px 6px 2px" }}>
-              <Row icon={<FaTag />}><b>{b.name}</b> {b.type ? `(${b.type})` : null}</Row>
-              {b.phone && <Row icon={<FaPhone />}><ContactLink href={`tel:${b.phone}`}>{b.phone}</ContactLink></Row>}
-              {(b.instagramUrl || b.instagramUsername) && <Row icon={<FaInstagram />}><ContactLink href={b.instagramUrl || `https://instagram.com/${b.instagramUsername}`} target="_blank">{b.instagramUsername || b.instagramUrl}</ContactLink></Row>}
-              {b.website && <Row icon={<FaGlobe />}><ContactLink href={/^https?:\/\//i.test(b.website) ? b.website : `https://${b.website}`} target="_blank">{b.website}</ContactLink></Row>}
-              {b.address && <Row icon={<FaLocationDot />}>{b.address}</Row>}
-            </div>
-          </div>
-          <aside style={styles.verifyCtaCol}>
-            <div style={styles.verifyCtaBox} className="glass">
-              <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 6 }}>İşletmeyi İncele</div>
-              <p style={{ fontSize: 14, opacity: 0.85, margin: "0 0 10px 0" }}>Profil sayfasında belgeler, yorumlar ve tüm detayları görün.</p>
-              <button className="btn success wide" onClick={() => canOpenProfile && navigate(profileUrl)} disabled={!canOpenProfile} style={styles.verifyBtn}>İşletmeyi İncele</button>
-            </div>
-          </aside>
-        </div>
-      )}
+  return (
+    <div>
+      <div style={{ textAlign: "center", marginTop: 8, marginBottom: 12 }}>
+        <div style={{ ...styles.resultIcon, background: iconBackground }}>{header.icon}</div>
+        <h2 style={{ fontSize: 24, fontWeight: 900, color: header.color, margin: 0 }}>
+          {header.title}
+        </h2>
+      </div>
 
-      {result.status === STATUS.BLACKLIST && (
-        <div style={{ padding: "6px 6px 2px" }}>
-          <Row icon={<FaTag />}><b>{b.name || "—"}</b></Row>
-          {b.phone && <Row icon={<FaPhone />}>{b.phone}</Row>}
-          {(b.instagramUrl || b.instagramUsername) && (
-            <Row icon={<FaInstagram />}><span style={{ color: "#e74c3c", fontWeight: 700 }}>{b.instagramUsername || b.instagramUrl}</span></Row>
-          )}
-          {b.address && <Row icon={<FaLocationDot />}>{b.address}</Row>}
-          <div className="warn-box">⚠️ Bu işletme kara listede. İşlem yapmadan önce dikkatli olun.</div>
-          <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
-            <button className="btn danger" onClick={() => canOpenProfile && navigate(profileUrl)} disabled={!canOpenProfile} style={styles.profileBtn}>Profili Aç</button>
-          </div>
-        </div>
-      )}
+      {result.status === STATUS.VERIFIED && (
+        <div style={styles.verifiedRow}>
+          <div style={styles.verifiedLeft}>
+            <div style={{ padding: "6px 6px 2px" }}>
+              <Row icon={<FaTag />}>
+                <b>{b.name}</b> {b.type ? `(${b.type})` : null}
+              </Row>
+              {b.phone && (
+                <Row icon={<FaPhone />}>
+                  <ContactLink href={`tel:${b.phone}`}>{b.phone}</ContactLink>
+                </Row>
+              )}
+              {(b.instagramUrl || b.instagramUsername) && (
+                <Row icon={<FaInstagram />}>
+                  <ContactLink
+                    href={b.instagramUrl || `https://instagram.com/${b.instagramUsername}`}
+                    target="_blank"
+                  >
+                    {b.instagramUsername || b.instagramUrl}
+                  </ContactLink>
+                </Row>
+              )}
+              {b.website && (
+                <Row icon={<FaGlobe />}>
+                  <ContactLink
+                    href={/^https?:\/\//i.test(b.website) ? b.website : `https://${b.website}`}
+                    target="_blank"
+                  >
+                    {b.website}
+                  </ContactLink>
+                </Row>
+              )}
+              {b.address && <Row icon={<FaLocationDot />}>{b.address}</Row>}
+            </div>
+          </div>
+          <aside style={styles.verifyCtaCol}>
+            <div style={styles.verifyCtaBox} className="glass">
+              <div style={{ fontWeight: 900, fontSize: 16, marginBottom: 6 }}>İşletmeyi İncele</div>
+              <p style={{ fontSize: 14, opacity: 0.85, margin: "0 0 10px 0" }}>
+                Profil sayfasında belgeler, yorumlar ve tüm detayları görün.
+              </p>
+              <button
+                className="btn success wide"
+                onClick={() => canOpenProfile && navigate(profileUrl)}
+                disabled={!canOpenProfile}
+                style={styles.verifyBtn}
+              >
+                İşletmeyi İncele
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
 
-      {result.status === STATUS.NOT_FOUND && (
-        <div style={{ textAlign: "center", color: "var(--fg-2)", padding: "8px 8px 2px" }}>
-          Bu aradığınız işletme veri tabanımızda bulunamadı.
-          <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16 }}>
-            <LinkButton to="/apply" color="#27ae60">İşletmeni Doğrula</LinkButton>
-            <LinkButton to="/report" color="#e74c3c">Dolandırıcılık İhbarı</LinkButton>
-          </div>
-        </div>
-      )}
+      {result.status === STATUS.BLACKLIST && (
+        <div style={{ padding: "6px 6px 2px" }}>
+          <Row icon={<FaTag />}>
+            <b>{b.name || "—"}</b>
+          </Row>
+          {b.phone && (
+            <Row icon={<FaPhone />}>
+              {b.phone}
+            </Row>
+          )}
+          {(b.instagramUrl || b.instagramUsername) && (
+            <Row icon={<FaInstagram />}>
+              <span style={{ color: "#e74c3c", fontWeight: 700 }}>
+                {b.instagramUsername || b.instagramUrl}
+              </span>
+            </Row>
+          )}
+          {b.address && <Row icon={<FaLocationDot />}>{b.address}</Row>}
+          <div className="warn-box">⚠️ Bu işletme kara listede. İşlem yapmadan önce dikkatli olun.</div>
+          <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+            <button
+              className="btn danger"
+              onClick={() => canOpenProfile && navigate(profileUrl)}
+              disabled={!canOpenProfile}
+              style={styles.profileBtn}
+            >
+              Profili Aç
+            </button>
+          </div>
+        </div>
+      )}
 
-      {result.status === STATUS.ERROR && (
-        <div style={{ textAlign: "center", color: "var(--fg-3)", paddingTop: 6 }}>
-          Üzgünüz, bir hata oluştu. Lütfen tekrar deneyin.
-        </div>
-      )}
-    </div>
-  );
+      {result.status === STATUS.NOT_FOUND && (
+        <div style={{ textAlign: "center", color: "var(--fg-2)", padding: "8px 8px 2px" }}>
+          Bu aradığınız işletme veri tabanımızda bulunamadı.
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 16 }}>
+            <LinkButton to="/apply" color="#27ae60">
+              İşletmeni Doğrula
+            </LinkButton>
+            <LinkButton to="/report" color="#e74c3c">
+              Dolandırıcılık İhbarı
+            </LinkButton>
+          </div>
+        </div>
+      )}
+
+      {result.status === STATUS.ERROR && (
+        <div style={{ textAlign: "center", color: "var(--fg-3)", paddingTop: 6 }}>
+          Üzgünüz, bir hata oluştu. Lütfen tekrar deneyin.
+        </div>
+      )}
+    </div>
+  );
 }
 
 const Row = ({ icon, children }) => (
-  <div style={styles.row}>
-    <span style={{ width: 22, textAlign: "center" }}>{icon}</span>
-    <div style={{ color: "var(--fg-2)" }}>{children}</div>
-  </div>
+  <div style={styles.row}>
+    <span style={{ width: 22, textAlign: "center" }}>{icon}</span>
+    <div style={{ color: "var(--fg-2)" }}>{children}</div>
+  </div>
 );
 
 const ContactLink = ({ href, target, children }) => (
-    <a href={href} target={target} rel={target === "_blank" ? "noreferrer noopener" : undefined} style={styles.contactLink}>
-        {children}
-    </a>
+  <a
+    href={href}
+    target={target}
+    rel={target === "_blank" ? "noreferrer noopener" : undefined}
+    style={styles.contactLink}
+  >
+    {children}
+  </a>
 );
 
 function LinkButton({ to, color, children }) {
-  const navigate = useNavigate();
-  return (
-    <button className="btn" onClick={() => navigate(to)} style={{ padding: "10px 14px", borderRadius: 10, background: color, color: "#fff", fontWeight: 800 }}>
-      {children}
-    </button>
-  );
+  const navigate = useNavigate();
+  return (
+    <button
+      className="btn"
+      onClick={() => navigate(to)}
+      style={{ padding: "10px 14px", borderRadius: 10, background: color, color: "#fff", fontWeight: 800 }}
+    >
+      {children}
+    </button>
+  );
 }
 
 const IconCheck = () => <FaCheck size={34} color="#fff" />;
@@ -504,42 +663,173 @@ const IconWarn = () => <FaTriangleExclamation size={34} color="#fff" />;
 const IconInfo = () => <FaCircleInfo size={34} color="#fff" />;
 
 function LoadingDots() {
-  return (
-    <span className="dots"><i></i><i></i><i></i></span>
-  );
+  return (
+    <span className="dots">
+      <i></i>
+      <i></i>
+      <i></i>
+    </span>
+  );
 }
 
 /* ================== STYLES ================== */
 const styles = {
-  page: { minHeight: "100vh", background: "var(--bg)", color: "var(--fg)", fontFamily: "Roboto, Arial, sans-serif", position: "relative", overflowX: "hidden" },
-  navWrap: { position: "fixed", top: 18, left: 20, right: 20, display: "flex", alignItems: "center", justifyContent: "space-between", zIndex: 30, pointerEvents: "none" },
-  navSpacer: { pointerEvents: "none" },
-  navRight: { display: "flex", gap: 12, alignItems: "center", pointerEvents: "auto" },
-  offline: { position: "fixed", top: 64, left: "50%", transform: "translateX(-50%)", background: "var(--warn-bg)", border: "1px solid #ffd6ba", color: "#ad3b12", padding: "8px 12px", borderRadius: 12, zIndex: 25 },
-  center: { width: "100%", display: "flex", flexDirection: "column", alignItems: "center", marginTop: "clamp(16px, 14vh, 120px)", paddingBottom: 110 },
-  logo: { width: 550, maxWidth: "85vw", height: "auto", marginBottom: 24 },
-  searchBarWrap: { display: "flex", alignItems: "center", gap: 8, width: "min(680px, 94vw)", margin: "0 auto 12px", padding: "6px 8px", borderRadius: 999, border: "1px solid var(--border)", background: "#fff" },
-  quickRow: { width: "min(680px, 94vw)", margin: "0 auto 10px", display: "flex", alignItems: "center", gap: 8 },
-  searchInput: { flex: 1, height: 44, padding: "0 18px", borderRadius: 999, border: "1px solid transparent", background: "transparent", fontSize: 16, outline: "none", color: "var(--fg)" },
-  searchBtn: { height: 36, padding: "0 16px", borderRadius: 999, border: "none", fontWeight: 800 },
-  howtoCard: { width: "min(680px, 94vw)", marginTop: 6, borderRadius: 14, border: "1px solid var(--border)", background: "#fff" },
-  howtoHeader: { padding: "14px 16px", borderBottom: "1px solid var(--border)", fontWeight: 900, letterSpacing: 0.2, color: "var(--fg-2)" },
-  howtoList: { listStyle: "none", padding: "10px 16px 14px", margin: 0, display: "grid", gap: 10, color: "var(--fg)" },
-  footer: { position: "fixed", left: 0, right: 0, bottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0 20px", zIndex: 20, pointerEvents: "none" },
-  footerLeft: { display: "flex", gap: 18, alignItems: "center", padding: "10px 12px", borderRadius: 14, background: "#fff", border: "1px solid var(--border)", boxShadow: "0 6px 14px rgba(0,0,0,.06)", pointerEvents: "auto" },
-  footerRight: { display: "flex", gap: 8, alignItems: "center", pointerEvents: "auto" },
-  overlay: { position: "fixed", inset: 0, background: "rgba(17,24,39,.45)", backdropFilter: "blur(3px)", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
-  modal: { width: "100%", maxWidth: 680, border: "1px solid var(--border)", borderRadius: 22, padding: 22, position: "relative", color: "var(--fg)", background: "var(--card)" },
-  verifiedRow: { display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", marginTop: 6 },
-  verifiedLeft: { flex: "1 1 300px", minWidth: 260 },
-  verifyCtaCol: { flex: "0 0 300px", minWidth: 260 },
-  verifyCtaBox: { border: "1px solid var(--border)", borderRadius: 16, padding: 16 },
-  toast: { position: "fixed", bottom: 92, left: "50%", transform: "translateX(-50%)", border: "1px solid var(--border)", padding: "8px 12px", borderRadius: 12, zIndex: 60, background: "#fff" },
-  resultIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 96, height: 96, borderRadius: "50%", marginBottom: 10, color: "#fff", boxShadow: "0 18px 60px rgba(0,0,0,.25)"},
-  row: { display: "flex", gap: 10, alignItems: "center", margin: "6px 0" },
-  contactLink: { color: "var(--brand)", fontWeight: 600, textDecoration: "none" },
-  verifyBtn: { width: "100%", borderRadius: 12, padding: "10px 12px", fontWeight: 900, opacity: 1, cursor: "pointer" },
-  profileBtn: { padding: "10px 14px", borderRadius: 10, fontWeight: 800, opacity: 1, cursor: "pointer" }
+  page: {
+    minHeight: "100vh",
+    background: "var(--bg)",
+    color: "var(--fg)",
+    fontFamily: "Roboto, Arial, sans-serif",
+    position: "relative",
+    overflowX: "hidden",
+  },
+  navWrap: {
+    position: "fixed",
+    top: 18,
+    left: 20,
+    right: 20,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 30,
+    pointerEvents: "none",
+  },
+  navSpacer: { pointerEvents: "none" },
+  navRight: { display: "flex", gap: 12, alignItems: "center", pointerEvents: "auto" },
+  offline: {
+    position: "fixed",
+    top: 64,
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "var(--warn-bg)",
+    border: "1px solid #ffd6ba",
+    color: "#ad3b12",
+    padding: "8px 12px",
+    borderRadius: 12,
+    zIndex: 25,
+  },
+  center: {
+    width: "100%",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    marginTop: "clamp(16px, 14vh, 120px)",
+    paddingBottom: 110,
+  },
+  logo: { width: 550, maxWidth: "85vw", height: "auto", marginBottom: 24 },
+  searchBarWrap: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    width: "min(680px, 94vw)",
+    margin: "0 auto 12px",
+    padding: "6px 8px",
+    borderRadius: 999,
+    border: "1px solid var(--border)",
+    background: "#fff",
+  },
+  quickRow: {
+    width: "min(680px, 94vw)",
+    margin: "0 auto 10px",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    height: 44,
+    padding: "0 18px",
+    borderRadius: 999,
+    border: "1px solid transparent",
+    background: "transparent",
+    fontSize: 16,
+    outline: "none",
+    color: "var(--fg)",
+  },
+  searchBtn: { height: 36, padding: "0 16px", borderRadius: 999, border: "none", fontWeight: 800 },
+  howtoCard: {
+    width: "min(680px, 94vw)",
+    marginTop: 6,
+    borderRadius: 14,
+    border: "1px solid var(--border)",
+    background: "#fff",
+  },
+  howtoHeader: { padding: "14px 16px", borderBottom: "1px solid var(--border)", fontWeight: 900, letterSpacing: 0.2, color: "var(--fg-2)" },
+  howtoList: { listStyle: "none", padding: "10px 16px 14px", margin: 0, display: "grid", gap: 10, color: "var(--fg)" },
+  footer: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 14,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "0 20px",
+    zIndex: 20,
+    pointerEvents: "none",
+  },
+  footerLeft: {
+    display: "flex",
+    gap: 18,
+    alignItems: "center",
+    padding: "10px 12px",
+    borderRadius: 14,
+    background: "#fff",
+    border: "1px solid var(--border)",
+    boxShadow: "0 6px 14px rgba(0, 0, 0, 0.06)",
+    pointerEvents: "auto",
+  },
+  footerRight: { display: "flex", gap: 8, alignItems: "center", pointerEvents: "auto" },
+  overlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(17,24,39,.45)",
+    backdropFilter: "blur(3px)",
+    zIndex: 50,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+  modal: {
+    width: "100%",
+    maxWidth: 680,
+    border: "1px solid var(--border)",
+    borderRadius: 22,
+    padding: 22,
+    position: "relative",
+    color: "var(--fg)",
+    background: "var(--card)",
+  },
+  verifiedRow: { display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", marginTop: 6 },
+  verifiedLeft: { flex: "1 1 300px", minWidth: 260 },
+  verifyCtaCol: { flex: "0 0 300px", minWidth: 260 },
+  verifyCtaBox: { border: "1px solid var(--border)", borderRadius: 16, padding: 16 },
+  toast: {
+    position: "fixed",
+    bottom: 92,
+    left: "50%",
+    transform: "translateX(-50%)",
+    border: "1px solid var(--border)",
+    padding: "8px 12px",
+    borderRadius: 12,
+    zIndex: 60,
+    background: "#fff",
+  },
+  resultIcon: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 96,
+    height: 96,
+    borderRadius: "50%",
+    marginBottom: 10,
+    color: "#fff",
+    boxShadow: "0 18px 60px rgba(0,0,0,.25)",
+  },
+  row: { display: "flex", gap: 10, alignItems: "center", margin: "6px 0" },
+  contactLink: { color: "var(--brand)", fontWeight: 600, textDecoration: "none" },
+  verifyBtn: { width: "100%", borderRadius: 12, padding: "10px 12px", fontWeight: 900, opacity: 1, cursor: "pointer" },
+  profileBtn: { padding: "10px 14px", borderRadius: 10, fontWeight: 800, opacity: 1, cursor: "pointer" },
 };
 
 const globalCSS = `@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap');
