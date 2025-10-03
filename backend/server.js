@@ -217,8 +217,24 @@ const uploadsStatic = express.static(UPLOADS_ROOT, staticOpts);
 app.use("/uploads", uploadsStatic);
 app.use("/api/uploads", uploadsStatic);
 
-/* ---------------- ✅ Static: /defaults (frontend/public/defaults) ---------------- */
-const DEFAULTS_DIR = path.join(__dirname, "../frontend/public/defaults");
+/* ---------------- ✅ Static: /defaults (robust) ---------------- */
+// Önce mevcut olan ilk klasörü bul (env > backend/public/defaults > cwd/public/defaults > monorepo frontend/public/defaults)
+async function firstExisting(paths) {
+  for (const p of paths.filter(Boolean)) {
+    try { await fs.access(p); return p; } catch {}
+  }
+  return null;
+}
+const DEFAULTS_DIR =
+  (await firstExisting([
+    process.env.DEFAULTS_DIR,                                // opsiyonel override (.env)
+    path.join(__dirname, "public/defaults"),                 // ✅ backend/public/defaults
+    path.join(process.cwd(), "public/defaults"),
+    path.join(__dirname, "../frontend/public/defaults"),     // monorepo ise
+  ])) || path.join(__dirname, "public/defaults");
+
+await fs.mkdir(DEFAULTS_DIR, { recursive: true });
+
 const defaultsStatic = express.static(DEFAULTS_DIR, {
   fallthrough: false,
   etag: true,
@@ -426,7 +442,7 @@ function ensureAdmin(req, res, next) {
     const payload = jwt.verify(tok, process.env.JWT_SECRET);
     if (payload?.role !== "admin") return res.status(403).json({ success: false, message: "Forbidden (admin gerekli)" });
     req.isAdmin = true;
-    req.admin = { id: payload.id, email: payload.email, method: "jwt" };
+       req.admin = { id: payload.id, email: payload.email, method: "jwt" };
     return next();
   } catch {
     return res.status(401).json({ success: false, message: "Geçersiz token" });
