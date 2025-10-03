@@ -1,3 +1,4 @@
+// src/pages/SapancaBungalov.jsx
 import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
@@ -214,8 +215,8 @@ export default function SapancaBungalov() {
       const list = {
         "@context": "https://schema.org",
         "@type": "ItemList",
-        "name": "Sapanca Bungalov Evleri",
-        "itemListElement": displayedItems.slice(0, 20).map((b, i) => {
+        name: "Sapanca Bungalov Evleri",
+        itemListElement: displayedItems.slice(0, 20).map((b, i) => {
           const url = `${origin}/isletme/${encodeURIComponent(b.slug)}`;
           const ratingValue =
             b.rating > 0 ? b.rating : b.googleRating > 0 ? b.googleRating : undefined;
@@ -265,44 +266,44 @@ export default function SapancaBungalov() {
       JSON.stringify({
         "@context": "https://schema.org",
         "@type": "FAQPage",
-        "mainEntity": [
+        mainEntity: [
           {
             "@type": "Question",
-            "name": "Sapanca bungalov fiyatları ne kadar?",
-            "acceptedAnswer": {
+            name: "Sapanca bungalov fiyatları ne kadar?",
+            acceptedAnswer: {
               "@type": "Answer",
-              "text":
-                "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan ve komisyonsuz konuşup güncel fiyatı öğrenebilirsiniz."
-            }
+              text:
+                "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan ve komisyonsuz konuşup güncel fiyatı öğrenebilirsiniz.",
+            },
           },
           {
             "@type": "Question",
-            "name": "Evcil hayvan kabul eden bungalov var mı?",
-            "acceptedAnswer": {
+            name: "Evcil hayvan kabul eden bungalov var mı?",
+            acceptedAnswer: {
               "@type": "Answer",
-              "text":
-                "Birçok işletme evcil dostu seçenek sunuyor. İşletme sayfalarında politika detaylarını bulabilir veya telefonla teyit edebilirsiniz."
-            }
+              text:
+                "Birçok işletme evcil dostu seçenek sunuyor. İşletme sayfalarında politika detaylarını bulabilir veya telefonla teyit edebilirsiniz.",
+            },
           },
           {
             "@type": "Question",
-            "name": "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
-            "acceptedAnswer": {
+            name: "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
+            acceptedAnswer: {
               "@type": "Answer",
-              "text":
-                "Evet. Filtreleyerek ya da açıklamaları inceleyerek jakuzili, göl manzaralı veya şömineli seçenekleri bulabilirsiniz."
-            }
+              text:
+                "Evet. Filtreleyerek ya da açıklamaları inceleyerek jakuzili, göl manzaralı veya şömineli seçenekleri bulabilirsiniz.",
+            },
           },
           {
             "@type": "Question",
-            "name": "E-Doğrula ne yapıyor?",
-            "acceptedAnswer": {
+            name: "E-Doğrula ne yapıyor?",
+            acceptedAnswer: {
               "@type": "Answer",
-              "text":
-                "E-Doğrula, işletme ile sizi doğrudan buluşturur; aracısız ve komisyonsuz iletişim kolaylığı sağlar."
-            }
-          }
-        ]
+              text:
+                "E-Doğrula, işletme ile sizi doğrudan buluşturur; aracısız ve komisyonsuz iletişim kolaylığı sağlar.",
+            },
+          },
+        ],
       }),
     []
   );
@@ -322,6 +323,13 @@ export default function SapancaBungalov() {
           content="Sapanca'daki en iyi bungalovları mı arıyorsunuz? 🏡 E-Doğrula ile doğrulanmış tesislere aracısız ulaşın, komisyon ödemeyin. Güvenilir tatilin adresi!"
         />
         <link rel="canonical" href={canonical} />
+        {/* Open Graph / Twitter */}
+        <meta property="og:title" content="Sapanca Bungalov Evleri | E-Doğrula" />
+        <meta property="og:description" content="Doğrulanmış işletmeler, aracısız iletişim." />
+        <meta property="og:type" content="website" />
+        <meta property="og:url" content={canonical} />
+        <meta property="og:image" content="/og/cover-sapanca.jpg" />
+        <meta name="twitter:card" content="summary_large_image" />
         {jsonLdItemList && (
           <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdItemList }} />
         )}
@@ -565,40 +573,108 @@ function ResultRow({ b }) {
   );
 }
 
-/* ---------- EN ALTA: “Planlayın” bölümü ---------- */
+/* ---------- EN ALTA: “Planlayın” bölümü (dinamik) ---------- */
 function IdeasSection() {
-  const cards = [
+  const [loading, setLoading] = useState(true);
+  const [posts, setPosts] = useState([]);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api
+      .get("/api/cms/articles/featured", { params: { place: "Sapanca", limit: 3 } })
+      .then(({ data }) => {
+        if (!alive) return;
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setPosts(items);
+      })
+      .catch(() => setPosts([]))
+      .finally(() => setLoading(false));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const fallback = [
     {
-      title: "Sapanca’da Jakuzili En İyi 5 Bungalov",
-      desc: "Huzurlu bir kaçamak için jakuzili en iyi bungalovları sizin için derledik…",
+      title: "Sapanca’da Jakuzili En İyi 7 Bungalov (2025)",
+      desc: "Jakuzili, şömineli ve doğa içinde konaklayabileceğiniz en iyi bungalovlar.",
       to: "/blog/jakuzili-bungalovlar",
+      image: "",
     },
     {
-      title: "Sapanca Gölü Kenarında Mutlaka Görülmesi Gereken Yerler",
-      desc: "Göl çevresindeki doğal güzellikler ve aktiviteleri keşfedin…",
-      to: "/blog/gol-kenari-rotalar",
+      title: "Sapanca Gölü Kenarında Görülmesi Gereken Yerler",
+      desc: "Göl çevresi rotaları, gün batımı noktaları ve lezzet durakları.",
+      to: "/blog/gol-kenari-gezilecek-yerler",
+      image: "",
     },
     {
       title: "Evcil Hayvan Dostu Sapanca Konaklama Rehberi",
-      desc: "Patili dostunuzla konforlu bir tatil yapabileceğiniz işletmeler…",
+      desc: "Patili dostunuzla rahat konaklayabileceğiniz işletmeler.",
       to: "/blog/evcil-dostu-isletmeler",
+      image: "",
     },
   ];
+
+  const cards = posts.length
+    ? posts.map((p) => ({
+        title: p.title,
+        desc: p.excerpt || "",
+        to: p.to || `/blog/${p.slug}`,
+        image: p.image || "",
+      }))
+    : fallback;
+
+  const jsonLd = {
+    "@context": "https://schema.org",
+    "@graph": cards.map((c) => ({
+      "@type": "Article",
+      headline: c.title,
+      description: c.desc,
+      mainEntityOfPage: { "@type": "WebPage", "@id": c.to },
+      image: c.image ? [c.image] : undefined,
+      author: { "@type": "Organization", name: "E-Doğrula" },
+      publisher: {
+        "@type": "Organization",
+        name: "E-Doğrula",
+        logo: { "@type": "ImageObject", url: "/logo192.png" },
+      },
+    })),
+  };
+
   return (
     <section className="ideas bottom">
       <h2 className="ideas-title">Sapanca Tatilinizi Planlayın</h2>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <div className="ideas-grid">
-        {cards.map((c, i) => (
-          <a key={i} className="ideas-card" href={c.to}>
-            <div className="ideas-media" />
-            <div className="ideas-overlay" />
-            <div className="ideas-body">
-              <h3 className="ideas-h3">{c.title}</h3>
-              <p className="ideas-p">{c.desc}</p>
-              <span className="ideas-link">Devamını Oku →</span>
+        {(loading ? Array.from({ length: 3 }) : cards).map((c, i) =>
+          loading ? (
+            <div key={i} className="ideas-card">
+              <div className="ideas-media" />
+              <div className="ideas-overlay" />
+              <div className="ideas-body">
+                <h3 className="ideas-h3">Yükleniyor…</h3>
+                <p className="ideas-p">Lütfen bekleyin.</p>
+              </div>
             </div>
-          </a>
-        ))}
+          ) : (
+            <a key={i} className="ideas-card" href={c.to}>
+              <div
+                className={`ideas-media ${c.image ? "with-img" : ""}`}
+                style={c.image ? { backgroundImage: `url(${c.image})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
+              />
+              <div className="ideas-overlay" />
+              <div className="ideas-body">
+                <h3 className="ideas-h3">{c.title}</h3>
+                <p className="ideas-p">{c.desc}</p>
+                <span className="ideas-link">Devamını Oku →</span>
+              </div>
+            </a>
+          )
+        )}
       </div>
     </section>
   );
@@ -793,6 +869,7 @@ function PageStyles() {
         border:1px solid var(--border); background:#f8fbff; transition:transform .20s, box-shadow .20s; }
       .ideas-card:hover{ transform:translateY(-4px); box-shadow:0 16px 32px rgba(0,0,0,.08); }
       .ideas-media{ height:160px; background:linear-gradient(135deg,#e2ecff,#f3f7ff); }
+      .ideas-media.with-img{ background-color:#eaeef7; }
       .ideas-overlay{ position:absolute; inset:0; background:linear-gradient(180deg,transparent 40%, rgba(0,0,0,.55) 100%); pointer-events:none; }
       .ideas-body{ position:absolute; left:0; right:0; bottom:0; padding:12px; color:#fff; }
       .ideas-h3{ margin:0 0 6px; font-size:16px; font-weight:900; text-shadow:0 1px 2px rgba(0,0,0,.35); }
@@ -909,6 +986,7 @@ function PageStyles() {
     `}</style>
   );
 }
+
 /* ---------- Basit sayfalama ---------- */
 function Pagination({ page, total, onChange }) {
   const win = 2;
