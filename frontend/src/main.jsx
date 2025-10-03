@@ -1,7 +1,8 @@
 // src/main.jsx
-import "./api/axios-boot"; // 🔧 GLOBAL: axios'u /api tekrarını önleyecek şekilde patch'ler
-import "./api/axios-boot.js";
-import "./index.css"; // ✅ Proje genel stilleri
+import "./api/axios-boot";          // ✅ tek import yeterli
+// import "./api/axios-boot.js";    // ❌ kaldır
+
+import "./index.css";
 
 import React from "react";
 import ReactDOM from "react-dom/client";
@@ -12,6 +13,7 @@ import {
   Link,
   useLocation,
 } from "react-router-dom";
+import { HelmetProvider } from "react-helmet-async";  // ✅ EKLENDİ
 
 import Login from "./pages/Login";
 import Dashboard from "./pages/Dashboard";
@@ -22,26 +24,19 @@ import BusinessProfile from "./pages/BusinessProfile";
 import VerifyEmail from "./pages/VerifyEmail";
 import Results from "./pages/Results";
 import SapancaBungalov from "./pages/SapancaBungalov";
-import BlacklistProfile from "./pages/BlacklistProfile"; // ✅ 1. YENİ SAYFA İÇERİ AKTARILDI
+import BlacklistProfile from "./pages/BlacklistProfile";
 
 /* ===================== URL Normalization (assets only) ===================== */
-
 function normalizeAssetPath(p) {
   if (!p) return p;
   const s0 = String(p).trim();
-
-  // Mutlak URL ise dokunma
   if (/^(https?:)?\/\//i.test(s0) || /^(data|blob):/i.test(s0)) return s0;
-
   let s = s0;
-  if (s.startsWith("/")) return s.replace(/\/{2,}/g, "/"); // gereksiz //
-
-  if (/^\/\/uploads\//i.test(s)) return s.replace(/^\/\//, "/"); // //uploads -> /uploads
-  if (/^uploads\//i.test(s)) return "/" + s.replace(/^\/+/, ""); // uploads/... -> /uploads/...
-
-  return s0; // göreli linkleri bozma
+  if (s.startsWith("/")) return s.replace(/\/{2,}/g, "/");
+  if (/^\/\/uploads\//i.test(s)) return s.replace(/^\/\//, "/");
+  if (/^uploads\//i.test(s)) return "/" + s.replace(/^\/+/, "");
+  return s0;
 }
-
 function normalizeBackgroundImage(el) {
   if (!el || !el.style) return;
   const bg = el.style.backgroundImage || "";
@@ -52,33 +47,26 @@ function normalizeBackgroundImage(el) {
   const fixed = normalizeAssetPath(orig);
   if (fixed && fixed !== orig) el.style.backgroundImage = `url(${fixed})`;
 }
-
 function normalizeElementAndDescendants(root) {
   if (!root || !(root instanceof Element)) return;
-
   if (root.tagName === "IMG") {
     const orig = root.getAttribute("src");
     const fixed = normalizeAssetPath(orig);
     if (fixed && fixed !== orig) root.setAttribute("src", fixed);
   }
-
   normalizeBackgroundImage(root);
-
   root.querySelectorAll("img[src]").forEach((img) => {
     const o = img.getAttribute("src");
     const f = normalizeAssetPath(o);
     if (f && f !== o) img.setAttribute("src", f);
   });
-
   root.querySelectorAll("[style*='background']").forEach((el) =>
     normalizeBackgroundImage(el)
   );
 }
-
 function useLiveAssetFix() {
   React.useEffect(() => {
     requestAnimationFrame(() => normalizeElementAndDescendants(document.body));
-
     const obs = new MutationObserver((mutations) => {
       for (const m of mutations) {
         if (m.type === "attributes") {
@@ -97,20 +85,17 @@ function useLiveAssetFix() {
         }
       }
     });
-
     obs.observe(document.body, {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["src", "style"], // href'i izleme (linkleri bozmasın)
+      attributeFilter: ["src", "style"],
     });
-
     return () => obs.disconnect();
   }, []);
 }
 
 /* ===================== Router & Layout ===================== */
-
 function ScrollToTop() {
   const { pathname } = useLocation();
   React.useEffect(() => {
@@ -118,7 +103,6 @@ function ScrollToTop() {
   }, [pathname]);
   return null;
 }
-
 function RootLayout() {
   useLiveAssetFix();
   return (
@@ -128,7 +112,6 @@ function RootLayout() {
     </>
   );
 }
-
 function NotFound() {
   return (
     <div
@@ -158,30 +141,18 @@ const router = createBrowserRouter(
         { index: true, element: <Search /> },
         { path: "apply", element: <Apply /> },
         { path: "report", element: <Report /> },
-
-        // /ara ve /search aynı sayfa
         { path: "ara", element: <Results /> },
         { path: "search", element: <Results /> },
-
-        // Sapanca bungalov listesi (Google tarzı)
         { path: "sapanca-bungalov-evleri", element: <SapancaBungalov /> },
-
-        // ✅ 2. YENİ ROUTE DOĞRU YERE EKLENDİ
         { path: "kara-liste/:slug", element: <BlacklistProfile /> },
-
         { path: "business/:slug", element: <BusinessProfile /> },
         { path: "isletme/:slug", element: <BusinessProfile /> },
         { path: "b/:slug", element: <BusinessProfile /> },
-
-        // dikkat: spesifik rotalardan sonra, en sonda kalsın
         { path: ":slug", element: <BusinessProfile /> },
-
         { path: "verify-email", element: <VerifyEmail /> },
-
         { path: "admin/login", element: <Login /> },
         { path: "admin/dashboard", element: <Dashboard /> },
         { path: "admin", element: <NotFound /> },
-
         { path: "*", element: <NotFound /> },
       ],
     },
@@ -190,14 +161,18 @@ const router = createBrowserRouter(
 );
 
 /* ===================== Mount ===================== */
-
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
   <React.StrictMode>
-    <RouterProvider
-      router={router}
-      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-      fallbackElement={<div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>}
-    />
+    {/* ✅ Helmet context tüm uygulama için burada sağlanıyor */}
+    <HelmetProvider>
+      <RouterProvider
+        router={router}
+        future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        fallbackElement={
+          <div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>
+        }
+      />
+    </HelmetProvider>
   </React.StrictMode>
 );

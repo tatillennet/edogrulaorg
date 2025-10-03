@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import { Helmet } from "react-helmet-async";
 import {
   FaInstagram,
   FaPhone,
@@ -33,18 +34,16 @@ export default function SapancaBungalov() {
   // sponsorlar
   const [featured, setFeatured] = useState([]);
 
-  // filtre/sıralama + arama (hero kalktığı için sadece client-side filtrede kullanılmıyor; istersen arama inputunu geri ekleyebiliriz)
+  // filtre/sıralama
   const [sort, setSort] = useState("rating"); // "rating" | "reviews"
   const [onlyVerified, setOnlyVerified] = useState(false);
-  const [query] = useState(""); // hero kalktı; şimdilik boş
-
   const [sortOpen, setSortOpen] = useState(false);
 
   // sayfalama
   const PER_PAGE = 20;
   const [page, setPage] = useState(1);
 
-  // görsel fallback (sadece sponsor kartlarında kullanılıyor)
+  // görsel fallback (sadece sponsor kartlarında)
   const DEFAULT_IMG = "/defaults/edogrula-default.webp.png";
 
   /* ---------- yardımcı: normalize ---------- */
@@ -190,7 +189,6 @@ export default function SapancaBungalov() {
     return items.filter((x) => !featuredIds.has(x.id));
   }, [items, featured, page]);
 
-  // Arama (client-side filtre) — şu an query boş
   const displayedItems = useMemo(() => organicItems, [organicItems]);
 
   // dış tık ile sort menüsünü kapat
@@ -206,8 +204,130 @@ export default function SapancaBungalov() {
     return () => document.removeEventListener("mousedown", onDoc);
   }, [sortOpen]);
 
+  /* ---------- JSON-LD (ItemList + LodgingBusiness) ---------- */
+  const jsonLdItemList = useMemo(() => {
+    try {
+      const origin =
+        typeof window !== "undefined"
+          ? `${window.location.origin}`
+          : "https://www.edogrula.org";
+      const list = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "name": "Sapanca Bungalov Evleri",
+        "itemListElement": displayedItems.slice(0, 20).map((b, i) => {
+          const url = `${origin}/isletme/${encodeURIComponent(b.slug)}`;
+          const ratingValue =
+            b.rating > 0 ? b.rating : b.googleRating > 0 ? b.googleRating : undefined;
+          const reviewCount =
+            b.reviews > 0 ? b.reviews : b.googleReviews > 0 ? b.googleReviews : undefined;
+
+          return {
+            "@type": "ListItem",
+            position: i + 1,
+            url,
+            item: {
+              "@type": "LodgingBusiness",
+              name: b.name,
+              url,
+              telephone: b.phone || undefined,
+              address: b.address
+                ? {
+                    "@type": "PostalAddress",
+                    streetAddress: b.address,
+                    addressLocality: "Sapanca",
+                    addressRegion: "Sakarya",
+                    addressCountry: "TR",
+                  }
+                : undefined,
+              sameAs: [b.instagramUrl, b.website].filter(Boolean),
+              aggregateRating:
+                ratingValue && reviewCount
+                  ? {
+                      "@type": "AggregateRating",
+                      ratingValue,
+                      reviewCount,
+                    }
+                  : undefined,
+            },
+          };
+        }),
+      };
+      return JSON.stringify(list);
+    } catch {
+      return "";
+    }
+  }, [displayedItems]);
+
+  /* ---------- JSON-LD (FAQPage) ---------- */
+  const jsonLdFAQ = useMemo(
+    () =>
+      JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Sapanca bungalov fiyatları ne kadar?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text":
+                "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan ve komisyonsuz konuşup güncel fiyatı öğrenebilirsiniz."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Evcil hayvan kabul eden bungalov var mı?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text":
+                "Birçok işletme evcil dostu seçenek sunuyor. İşletme sayfalarında politika detaylarını bulabilir veya telefonla teyit edebilirsiniz."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text":
+                "Evet. Filtreleyerek ya da açıklamaları inceleyerek jakuzili, göl manzaralı veya şömineli seçenekleri bulabilirsiniz."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "E-Doğrula ne yapıyor?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text":
+                "E-Doğrula, işletme ile sizi doğrudan buluşturur; aracısız ve komisyonsuz iletişim kolaylığı sağlar."
+            }
+          }
+        ]
+      }),
+    []
+  );
+
+  const canonical =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/sapanca-bungalov-evleri`
+      : "https://www.edogrula.org/sapanca-bungalov-evleri";
+
   return (
     <>
+      {/* ======= SEO HEAD ======= */}
+      <Helmet>
+        <title>Sapanca Bungalov Evleri: 20+ Doğrulanmış Tesis (Aracısız) | E-Doğrula</title>
+        <meta
+          name="description"
+          content="Sapanca'daki en iyi bungalovları mı arıyorsunuz? 🏡 E-Doğrula ile doğrulanmış tesislere aracısız ulaşın, komisyon ödemeyin. Güvenilir tatilin adresi!"
+        />
+        <link rel="canonical" href={canonical} />
+        {jsonLdItemList && (
+          <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdItemList }} />
+        )}
+        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdFAQ }} />
+      </Helmet>
+
       <PageStyles />
       <div className="page-shell">
         <nav className="main-nav">
@@ -216,8 +336,15 @@ export default function SapancaBungalov() {
         </nav>
 
         <main className="content-container">
+          {/* Tekil H1 */}
+          <header className="page-title">
+            <h1>Sapanca Bungalov Evleri</h1>
+            <p className="page-sub">
+              E-Doğrula tarafından doğrulanmış işletmelerle aracısız ve komisyonsuz iletişim kurun.
+            </p>
+          </header>
 
-          {/* ÜST: Hava durumu + bilgi (hero tamamen kaldırıldı) */}
+          {/* ÜST: Hava durumu + bilgi */}
           <section className="top-knowledge">
             <KnowledgeHeader query="Sapanca" http={api} showMedia />
           </section>
@@ -230,9 +357,7 @@ export default function SapancaBungalov() {
             <>
               {page === 1 && featured.length > 0 && (
                 <section className="sponsored-section">
-                  <div className="section-top">
-                    <h2 className="section-title">Öne Çıkan Tesisler</h2>
-                  </div>
+                  <h2 className="section-title">Öne Çıkan Tesisler</h2>
                   <div className="horizontal-scroll">
                     {featured.map((it) => (
                       <SponsoredCard key={it.id} business={it} />
@@ -243,7 +368,16 @@ export default function SapancaBungalov() {
 
               <section>
                 <header className="results-header">
-                  <h2 className="section-title">Arama Sonuçları</h2>
+                  <div>
+                    <h2 className="section-title">Tüm Sapanca Bungalovları</h2>
+                    <p className="intro">
+                      Sapanca’nın eşsiz doğasında, <strong>göl manzaralı</strong> ya da
+                      <strong> jakuzili</strong> seçenekleriyle bungalov tatilinizi planlayın.
+                      Aşağıda, E-Doğrula tarafından doğrulanmış ve <strong>doğrudan iletişim</strong>
+                      kurabileceğiniz tüm işletmeleri bulabilirsiniz.
+                    </p>
+                  </div>
+
                   <div className="filters">
                     <label className="filter-checkbox">
                       <input
@@ -304,6 +438,9 @@ export default function SapancaBungalov() {
 
           {/* EN ALTA: Planlama makaleleri */}
           <IdeasSection />
+
+          {/* EN ALTA: SSS */}
+          <FAQSection />
         </main>
       </div>
     </>
@@ -467,37 +604,38 @@ function IdeasSection() {
   );
 }
 
-/* ---------- Basit sayfalama ---------- */
-function Pagination({ page, total, onChange }) {
-  const win = 2;
-  const pages = [];
-  for (let p = 1; p <= total; p++) {
-    if (p === 1 || p === total || (p >= page - win && p <= page + win)) {
-      pages.push(p);
-    } else if (pages[pages.length - 1] !== "...") {
-      pages.push("...");
-    }
-  }
+/* ---------- EN ALTA: SSS (görünür içerik) ---------- */
+function FAQSection() {
+  const faqs = [
+    {
+      q: "Sapanca bungalov fiyatları ne kadar?",
+      a: "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan iletişime geçerek güncel fiyat bilgisini alabilirsiniz.",
+    },
+    {
+      q: "Evcil hayvan kabul eden bungalov var mı?",
+      a: "Birçok işletme evcil dostu. İlgili işletme sayfasındaki politika kısmını inceleyin veya telefonla teyit edin.",
+    },
+    {
+      q: "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
+      a: "Evet. Açıklamalarda belirtilir; ayrıca telefonla sormanız önerilir.",
+    },
+    {
+      q: "E-Doğrula ne yapıyor?",
+      a: "Aracısız, komisyonsuz bir şekilde işletme ile sizi doğrudan buluşturur.",
+    },
+  ];
   return (
-    <div className="pager">
-      <button className="pager-btn" disabled={page <= 1} onClick={() => onChange(page - 1)}>
-        ‹ Önceki
-      </button>
-      {pages.map((p, i) =>
-        p === "..." ? (
-          <span key={`gap-${i}`} className="pager-gap">
-            …
-          </span>
-        ) : (
-          <button key={p} className={`pager-num ${p === page ? "active" : ""}`} onClick={() => onChange(p)}>
-            {p}
-          </button>
-        )
-      )}
-      <button className="pager-btn" disabled={page >= total} onClick={() => onChange(page + 1)}>
-        Sonraki ›
-      </button>
-    </div>
+    <section className="faq">
+      <h2 className="section-title">Sıkça Sorulan Sorular</h2>
+      <div className="faq-list">
+        {faqs.map((f, i) => (
+          <details key={i} className="faq-item">
+            <summary>{f.q}</summary>
+            <div className="faq-a">{f.a}</div>
+          </details>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -638,7 +776,15 @@ function PageStyles() {
 
       .content-container{ max-width:1200px; margin-left:clamp(14px, 3.2vw, 32px); margin-right:auto; padding:28px 0 96px; }
 
-      /* ----------- Ideas (Planlayın) ----------- */
+      /* Page title */
+      .page-title{ margin-bottom:12px; }
+      .page-title h1{ font-size:28px; font-weight:900; margin:0; color:#0f172a; }
+      .page-sub{ margin:6px 0 0; color:#334155; }
+
+      /* Intro text */
+      .intro{ margin:6px 0 0; color:#334155; max-width:780px; }
+
+      /* Ideas (Planlayın) */
       .ideas{ margin:26px 0 6px; }
       .ideas.bottom{ margin-top:36px; }
       .ideas-title{ font-size:20px; font-weight:800; color:#1e293b; margin:6px 0 12px; }
@@ -654,7 +800,6 @@ function PageStyles() {
       .ideas-link{ font-weight:800; }
 
       /* Bölüm başlıkları */
-      .section-top{ display:flex; align-items:center; justify-content:space-between; }
       .section-title{ font-size:22px; font-weight:800; color:#1e293b; margin:12px 0; }
 
       /* Sponsorlar */
@@ -672,7 +817,7 @@ function PageStyles() {
       .sponsored-location{ font-size:14px; color:var(--muted); margin:0; }
 
       /* Filtre barı */
-      .results-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-radius:14px; border:1px solid var(--border); background:var(--card); margin-bottom:18px; }
+      .results-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:12px 16px; border-radius:14px; border:1px solid var(--border); background:var(--card); margin-bottom:18px; }
       .filters{ display:flex; align-items:center; gap:16px; position:relative; }
       .filter-checkbox{ display:inline-flex; gap:8px; align-items:center; cursor:pointer; font-size:14px; }
       .sort{ position:relative; }
@@ -740,6 +885,13 @@ function PageStyles() {
       .kb-forecast-temps{ font-size:14px; }
       .kb-route{ display:block; text-align:center; font-weight:800; border:1px solid var(--border); border-radius:10px; padding:10px; text-decoration:none; color:var(--fg); background:#fff; }
 
+      /* FAQ */
+      .faq{ margin-top:26px; }
+      .faq-list{ display:grid; gap:10px; }
+      .faq-item{ border:1px solid var(--border); border-radius:12px; background:#fff; padding:10px 12px; }
+      .faq-item summary{ cursor:pointer; font-weight:800; }
+      .faq-a{ color:#334155; padding-top:6px; }
+
       /* Pager */
       .pager{ margin:22px 0 0; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
       .pager-btn{ padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:#fff; cursor:pointer; }
@@ -755,5 +907,41 @@ function PageStyles() {
         .gscore-col{ justify-content:flex-start; }
       }
     `}</style>
+  );
+}
+/* ---------- Basit sayfalama ---------- */
+function Pagination({ page, total, onChange }) {
+  const win = 2;
+  const pages = [];
+  for (let p = 1; p <= total; p++) {
+    if (p === 1 || p === total || (p >= page - win && p <= page + win)) {
+      pages.push(p);
+    } else if (pages[pages.length - 1] !== "...") {
+      pages.push("...");
+    }
+  }
+  return (
+    <div className="pager" role="navigation" aria-label="Sayfalama">
+      <button className="pager-btn" disabled={page <= 1} onClick={() => onChange(page - 1)}>
+        ‹ Önceki
+      </button>
+      {pages.map((p, i) =>
+        p === "..." ? (
+          <span key={`gap-${i}`} className="pager-gap">…</span>
+        ) : (
+          <button
+            key={p}
+            className={`pager-num ${p === page ? "active" : ""}`}
+            onClick={() => onChange(p)}
+            aria-current={p === page ? "page" : undefined}
+          >
+            {p}
+          </button>
+        )
+      )}
+      <button className="pager-btn" disabled={page >= total} onClick={() => onChange(page + 1)}>
+        Sonraki ›
+      </button>
+    </div>
   );
 }
