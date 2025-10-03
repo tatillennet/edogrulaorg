@@ -1,4 +1,4 @@
-// backend/server.js
+// backend/server.js — Pro (güncel, güvenli uploads fallback)
 import express from "express";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
@@ -20,7 +20,7 @@ import nodemailer from "nodemailer";
 
 // Routes
 import authRoutes from "./routes/auth.js";
-import businessRoutes from "./routes/business.js";
+import businessRoutes from "./routes/business.js"; // Eğer dosyanız businesses.js ise bunu güncelleyin
 import applyRoutes from "./routes/apply.js";
 import reportRoutes from "./routes/report.js";
 import reviewsRoutes from "./routes/reviews.js";
@@ -28,6 +28,10 @@ import exploreRoutes from "./routes/explore.js";
 import adminRoutes from "./routes/admin.js";
 import blacklistRoutes from "./routes/blacklist.js";
 import googleRoutes from "./routes/google.js";
+import knowledgeRoutes from "./routes/knowledge.js";
+
+// ✅ Featured (public & admin)
+import { publicFeaturedRouter, adminFeaturedRouter } from "./routes/admin.featured.js";
 
 // Models
 import User from "./models/User.js";
@@ -177,6 +181,23 @@ app.use((req, res, next) => {
 const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads"));
 await fs.mkdir(UPLOADS_ROOT, { recursive: true });
 
+// Defaults path (kullanılacak default görsel için)
+async function firstExisting(paths) {
+  for (const p of paths.filter(Boolean)) {
+    try { await fs.access(p); return p; } catch {}
+  }
+  return null;
+}
+const DEFAULTS_DIR =
+  (await firstExisting([
+    process.env.DEFAULTS_DIR,
+    path.join(__dirname, "public/defaults"),
+    path.join(process.cwd(), "public/defaults"),
+    path.join(__dirname, "../frontend/public/defaults"),
+  ])) || path.join(__dirname, "public/defaults");
+await fs.mkdir(DEFAULTS_DIR, { recursive: true });
+const DEFAULT_IMG = path.join(DEFAULTS_DIR, "edogrula-default.webp.png");
+
 /* ---------------- Legacy apply/* mapper ---------------- */
 app.get(/^\/(?:api\/)?uploads\/apply\/([^/]+)\/(\d+)\.jpe?g$/i, async (req, res) => {
   try {
@@ -203,38 +224,7 @@ app.get(/^\/(?:api\/)?uploads\/apply\/([^/]+)\/(\d+)\.jpe?g$/i, async (req, res)
   }
 });
 
-/* ---------------- Static: /uploads ---------------- */
-const staticOpts = {
-  fallthrough: false,
-  etag: true,
-  maxAge: isProd ? "30d" : 0,
-  setHeaders(res) {
-    res.setHeader("Cache-Control", isProd ? "public, max-age=2592000, immutable" : "no-cache");
-    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
-  },
-};
-const uploadsStatic = express.static(UPLOADS_ROOT, staticOpts);
-app.use("/uploads", uploadsStatic);
-app.use("/api/uploads", uploadsStatic);
-
-/* ---------------- ✅ Static: /defaults (robust) ---------------- */
-// Önce mevcut olan ilk klasörü bul (env > backend/public/defaults > cwd/public/defaults > monorepo frontend/public/defaults)
-async function firstExisting(paths) {
-  for (const p of paths.filter(Boolean)) {
-    try { await fs.access(p); return p; } catch {}
-  }
-  return null;
-}
-const DEFAULTS_DIR =
-  (await firstExisting([
-    process.env.DEFAULTS_DIR,                                // opsiyonel override (.env)
-    path.join(__dirname, "public/defaults"),                 // ✅ backend/public/defaults
-    path.join(process.cwd(), "public/defaults"),
-    path.join(__dirname, "../frontend/public/defaults"),     // monorepo ise
-  ])) || path.join(__dirname, "public/defaults");
-
-await fs.mkdir(DEFAULTS_DIR, { recursive: true });
-
+/* ---------------- Static: /defaults ---------------- */
 const defaultsStatic = express.static(DEFAULTS_DIR, {
   fallthrough: false,
   etag: true,
@@ -246,13 +236,55 @@ const defaultsStatic = express.static(DEFAULTS_DIR, {
 });
 app.use("/defaults", defaultsStatic);
 
+/* ---------------- Safe uploads fallback (NO ENOENT logs) ---------------- */
+function safeUploadsFallback() {
+  return async (req, res, next) => {
+    try {
+      const rel = decodeURIComponent((req.path || "").replace(/^\/+/, ""));
+      const abs = path.normalize(path.join(UPLOADS_ROOT, rel));
+      if (!abs.startsWith(UPLOADS_ROOT)) return res.status(400).end();
+      try {
+        await fs.access(abs);
+        return next(); // dosya var → static servis etsin
+      } catch {
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(DEFAULT_IMG);
+      }
+    } catch (e) {
+      if (!isProd) console.error("uploads fallback error:", e);
+      return res.sendFile(DEFAULT_IMG);
+    }
+  };
+}
+
+/* ---------------- Static: /uploads (fallback + static) ---------------- */
+const staticOpts = {
+  fallthrough: true, // fallback'tan sonra static'e geçsin
+  etag: true,
+  maxAge: isProd ? "30d" : 0,
+  setHeaders(res) {
+    res.setHeader("Cache-Control", isProd ? "public, max-age=2592000, immutable" : "no-cache");
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  },
+};
+app.use("/uploads", safeUploadsFallback());
+app.use("/uploads", express.static(UPLOADS_ROOT, staticOpts));
+// API aliased
+app.use("/api/uploads", safeUploadsFallback());
+app.use("/api/uploads", express.static(UPLOADS_ROOT, staticOpts));
+
+/* ---------------- Knowledge (Google-like header) ---------------- */
+app.use("/api", knowledgeRoutes);
+
 /* ---------------- Absolutize JSON media URLs ---------------- */
 const getBaseUrl = (req) =>
   (process.env.PUBLIC_BASE_URL || "").trim() ||
   `${req.headers["x-forwarded-proto"] || req.protocol}://${req.get("host")}`;
 
 const toAbs = (p, base) =>
-  typeof p === "string" && p.startsWith("/uploads/") ? `${base}${p}` : p;
+  typeof p === "string" && (p.startsWith("/uploads/") || p.startsWith("/defaults/"))
+    ? `${base}${p}`
+    : p;
 
 function absolutizeInPlace(node, base, depth = 0) {
   if (!node || depth > 6) return;
@@ -322,7 +354,10 @@ app.get("/api/img", async (req, res) => {
     const w = Math.max(320, Math.min(4096, parseInt(req.query.w || "1200", 10) || 1200));
     const dpr = Math.max(1, Math.min(3, parseFloat(req.query.dpr || "1") || 1));
     const q = Math.max(40, Math.min(95, parseInt(req.query.q || "82", 10) || 82));
-    const fit = /^(cover|contain|inside)$/i.test(String(req.query.fit || "")) ? String(req.query.fit).toLowerCase() : "cover";
+    const fit =
+      /^(cover|contain|inside)$/i.test(String(req.query.fit || ""))
+        ? String(req.query.fit).toLowerCase()
+        : "cover";
 
     let fmt = String(req.query.fmt || "auto").toLowerCase();
     if (fmt === "auto") {
@@ -440,9 +475,11 @@ function ensureAdmin(req, res, next) {
   if (!tok) return res.status(401).json({ success: false, message: "Yetkisiz (token yok)" });
   try {
     const payload = jwt.verify(tok, process.env.JWT_SECRET);
-    if (payload?.role !== "admin") return res.status(403).json({ success: false, message: "Forbidden (admin gerekli)" });
+    if (payload?.role !== "admin") {
+      return res.status(403).json({ success: false, message: "Forbidden (admin gerekli)" });
+    }
     req.isAdmin = true;
-       req.admin = { id: payload.id, email: payload.email, method: "jwt" };
+    req.admin = { id: payload.id, email: payload.email, method: "jwt" };
     return next();
   } catch {
     return res.status(401).json({ success: false, message: "Geçersiz token" });
@@ -465,14 +502,7 @@ app.post("/api/_debug/smtp-check", noCache, async (_req, res) => {
   } catch (err) {
     const payload = isProd
       ? { success: false, message: err?.message || "SMTP error" }
-      : {
-          success: false,
-          message: err?.message,
-          code: err?.code,
-          command: err?.command,
-          response: err?.response,
-          stack: err?.stack,
-        };
+      : { success: false, message: err?.message, code: err?.code, command: err?.command, response: err?.response, stack: err?.stack };
     return res.status(502).json(payload);
   }
 });
@@ -486,8 +516,14 @@ app.use("/api/report", reportRoutes);
 app.use("/api/reviews", reviewsRoutes);
 app.use("/api/explore", exploreRoutes);
 app.use("/api/google", googleRoutes);
-app.use("/api/admin", ensureAdmin, adminRoutes);
 app.use("/api/blacklist", blacklistRoutes);
+
+// ✅ Featured (public & admin)
+app.use("/api/featured", publicFeaturedRouter);
+app.use("/api/admin/featured", ensureAdmin, adminFeaturedRouter);
+
+// Admin root (diğer admin uçları)
+app.use("/api/admin", ensureAdmin, adminRoutes);
 
 /* ---------------- 404 & Error ---------------- */
 app.use((req, res) => {

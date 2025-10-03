@@ -11,6 +11,14 @@ const router = express.Router();
 /* --------------------------------- utils --------------------------------- */
 const isObjId = (s) => mongoose.isValidObjectId(String(s || ""));
 const toArray = (v) => (Array.isArray(v) ? v : v ? [v] : []).filter(Boolean);
+const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// güvenli sayı (virgüllü stringleri de çevirir)
+const toNum = (v) => {
+  if (v == null) return 0;
+  const n = Number(String(v).replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+};
 
 // slug
 const makeSlug = (str = "") =>
@@ -39,8 +47,6 @@ function normPhone(raw) {
   } catch {}
   return s.replace(/[^\d+]/g, "");
 }
-
-const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /* -------------------------- classify incoming query ----------------------- */
 function classifyQuery(qRaw = "", hintedType = "") {
@@ -134,6 +140,150 @@ function requireAdmin(req, res, next) {
   }
 }
 
+/* ------------------------------ PUBLIC: /filter ------------------------------ */
+/**
+ * GET /api/businesses/filter
+ * Query:
+ *  - address=Sapanca (regex, i)
+ *  - type=bungalov (bungalov|bungalow eşleşir)
+ *  - onlyVerified=true|false
+ *  - sort=rating|reviews (default: rating)
+ *  - page, perPage
+ * Döner: { items:[...], total, page, perPage }
+ */
+router.get("/filter", async (req, res) => {
+  try {
+    const {
+      address = "",
+      type = "",
+      onlyVerified = "false",
+      sort = "rating", // "rating" | "reviews"
+      page = "1",
+      perPage = "20",
+    } = req.query;
+
+    const q = {};
+
+    // Adres (case-insensitive)
+    if (address) {
+      q.address = { $regex: new RegExp(escapeRegex(address), "i") };
+    }
+
+    // Tür
+    if (type) {
+      const t = String(type).toLowerCase();
+      if (t === "bungalov") {
+        q.$or = [
+          { type: { $regex: /bungalov/i } },
+          { type: { $regex: /bungalow/i } },
+        ];
+      } else {
+        q.type = { $regex: new RegExp(escapeRegex(type), "i") };
+      }
+    }
+
+    if (String(onlyVerified).toLowerCase() === "true") q.verified = true;
+
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(perPage, 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    // Gerekli alanlar (google varyantları dahil)
+    const rows = await Business.find(q)
+      .select(
+        [
+          "name",
+          "slug",
+          "verified",
+          "address",
+          "phone",
+          "website",
+          "handle",
+          "instagramUsername",
+          "instagramUrl",
+          "type",
+          "summary",
+          "description",
+          "rating",
+          "reviewsCount",
+          "gallery",
+          "photo",
+          // google varyantları
+          "google",
+          "google_rate",
+          "google_rating",
+          "googleReviewsCount",
+          "google_reviews",
+          "google_reviews_count",
+        ].join(" ")
+      )
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
+
+    // normalize — frontend expectations
+    const items = rows.map((b) => {
+      // google rating & reviews — tüm bilinen isimlerden oku
+      const googleRating = toNum(
+        b.googleRating ??
+          b.google_rate ??
+          b.google_rating ??
+          b?.google?.rating ??
+          0
+      );
+
+      const googleReviewsCount = toNum(
+        b.googleReviewsCount ??
+          b.google_reviews_count ??
+          b.google_reviews ??
+          b?.google?.reviewsCount ??
+          b?.google?.user_ratings_total ??
+          0
+      );
+
+      const photo =
+        (Array.isArray(b.gallery) && b.gallery[0]) || b.photo || null;
+
+      return {
+        _id: b._id,
+        slug: b.slug || String(b._id),
+        name: b.name || "İsimsiz İşletme",
+        verified: !!b.verified,
+        address: b.address || "",
+        phone: b.phone || "",
+        website: b.website || "",
+        instagramUsername: b.instagramUsername || b.handle || "",
+        instagramUrl: b.instagramUrl || "",
+        type: b.type || "Bungalov",
+        gallery: Array.isArray(b.gallery) ? b.gallery.slice(0, 5) : [],
+        photo,
+        summary: b.summary || b.description || "",
+        rating: toNum(b.rating),
+        reviewsCount: toNum(b.reviewsCount),
+        googleRating,
+        googleReviewsCount,
+      };
+    });
+
+    // Sıralama: E-Doğrula > Google (puan veya yorum moduna göre)
+    const score = (x) => (x.rating > 0 ? x.rating : x.googleRating || 0);
+    const rev = (x) =>
+      x.reviewsCount > 0 ? x.reviewsCount : x.googleReviewsCount || 0;
+
+    items.sort((a, b) =>
+      sort === "reviews" ? rev(b) - rev(a) : score(b) - score(a)
+    );
+
+    const total = await Business.countDocuments(q);
+    return res.json({ items, total, page: pageNum, perPage: limitNum });
+  } catch (err) {
+    console.error("filter_error", err);
+    return res
+      .status(500)
+      .json({ error: "filter_failed", message: err.message });
+  }
+});
+
 /* ------------------------------ PUBLIC: /search ------------------------------ */
 /**
  * GET /api/businesses/search?q=...&type=ig_url|ig_username|phone|website|text
@@ -150,7 +300,12 @@ router.get("/search", async (req, res) => {
 
     const cls = classifyQuery(raw, hintedType);
     if (!cls.ok) {
-      return res.json({ success: true, status: "not_found", reason: cls.reason, businesses: [] });
+      return res.json({
+        success: true,
+        status: "not_found",
+        reason: cls.reason,
+        businesses: [],
+      });
     }
 
     const key = cacheKey(cls.value, cls.type, limit);
@@ -168,28 +323,42 @@ router.get("/search", async (req, res) => {
     const phone = cls.type === "phone" ? normPhone(qText) : "";
 
     // --- 1) Verified işletmeler
-    const or = [{ name: rxAny }, { slug: rxSlugExact }, { handle: rxHandleExact }, { instagramUsername: rxIgUser }];
+    const or = [
+      { name: rxAny },
+      { slug: rxSlugExact },
+      { handle: rxHandleExact },
+      { instagramUsername: rxIgUser },
+    ];
 
     if (cls.type === "ig_url" || cls.type === "website" || cls.type === "text") {
       or.push({ instagramUrl: rxAny }, { website: rxAny });
     }
     if (cls.type === "phone") {
       if (phone) or.push({ phone: new RegExp(escapeRegex(phone), "i") });
-      // kullanıcı farklı format girmiş olabilir; digits-only ile kaba arama:
+      // digits-only kaba arama (son 10 hane)
       const digits = phone.replace(/\D/g, "");
-      if (digits) or.push({ phone: new RegExp(digits.slice(-10)) }); // son 10 haneye bakan match
+      if (digits) or.push({ phone: new RegExp(digits.slice(-10)) });
     }
 
     const verified = await Business.find({ $or: or }).limit(limit).lean();
 
     if (verified.length) {
-      const payload = { success: true, status: "verified", business: verified[0], businesses: verified };
+      const payload = {
+        success: true,
+        status: "verified",
+        business: verified[0],
+        businesses: verified,
+      };
       cacheSet(key, payload);
       return res.json(payload);
     }
 
     // --- 2) Blacklist
-    const blOr = [{ name: rxAny }, { instagramUsername: rxIgUser }, { instagramUrl: rxAny }];
+    const blOr = [
+      { name: rxAny },
+      { instagramUsername: rxIgUser },
+      { instagramUrl: rxAny },
+    ];
     if (phone) blOr.push({ phone: new RegExp(escapeRegex(phone), "i") });
 
     const black = await Blacklist.findOne({ $or: blOr }).lean();
@@ -203,7 +372,12 @@ router.get("/search", async (req, res) => {
     cacheSet(key, payload);
     return res.json(payload);
   } catch (err) {
-    return res.status(500).json({ success: false, status: "error", message: "Search error", error: err.message });
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      message: "Search error",
+      error: err.message,
+    });
   }
 });
 
@@ -214,14 +388,23 @@ router.get("/search", async (req, res) => {
 router.get("/by-slug/:slug", async (req, res) => {
   try {
     const slug = makeSlug(req.params.slug || "");
-    if (!slug) return res.status(400).json({ success: false, status: "error", message: "Geçersiz slug" });
+    if (!slug)
+      return res
+        .status(400)
+        .json({ success: false, status: "error", message: "Geçersiz slug" });
 
     const business = await Business.findOne({ slug }).lean();
-    if (!business) return res.status(404).json({ success: true, status: "not_found" });
+    if (!business)
+      return res.status(404).json({ success: true, status: "not_found" });
 
     return res.json({ success: true, status: "verified", business });
   } catch (err) {
-    return res.status(500).json({ success: false, status: "error", message: "Detail error", error: err.message });
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      message: "Detail error",
+      error: err.message,
+    });
   }
 });
 
@@ -232,18 +415,30 @@ router.get("/by-slug/:slug", async (req, res) => {
 router.get("/handle/:handle", async (req, res) => {
   try {
     const handle = normHandle(req.params.handle || "");
-    if (!handle) return res.status(400).json({ success: false, status: "error", message: "Geçersiz handle" });
+    if (!handle)
+      return res
+        .status(400)
+        .json({ success: false, status: "error", message: "Geçersiz handle" });
 
     const rxHandleExact = new RegExp(`^${escapeRegex(handle)}$`, "i");
 
     const business = await Business.findOne({
-      $or: [{ handle: rxHandleExact }, { instagramUsername: new RegExp(`^@?${escapeRegex(handle)}$`, "i") }],
+      $or: [
+        { handle: rxHandleExact },
+        { instagramUsername: new RegExp(`^@?${escapeRegex(handle)}$`, "i") },
+      ],
     }).lean();
 
-    if (!business) return res.status(404).json({ success: true, status: "not_found" });
+    if (!business)
+      return res.status(404).json({ success: true, status: "not_found" });
     return res.json({ success: true, status: "verified", business });
   } catch (err) {
-    return res.status(500).json({ success: false, status: "error", message: "Detail error", error: err.message });
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      message: "Detail error",
+      error: err.message,
+    });
   }
 });
 
@@ -269,7 +464,11 @@ router.get("/:id", async (req, res) => {
     const rxHandleExact = new RegExp(`^${escapeRegex(handle)}$`, "i");
 
     const b2 = await Business.findOne({
-      $or: [{ slug }, { handle: rxHandleExact }, { instagramUsername: new RegExp(`^@?${escapeRegex(handle)}$`, "i") }],
+      $or: [
+        { slug },
+        { handle: rxHandleExact },
+        { instagramUsername: new RegExp(`^@?${escapeRegex(handle)}$`, "i") },
+      ],
     }).lean();
     if (b2) return res.json({ success: true, status: "verified", business: b2 });
 
@@ -279,9 +478,16 @@ router.get("/:id", async (req, res) => {
       if (bl) return res.json({ success: true, status: "blacklist", business: bl });
     }
 
-    return res.status(404).json({ success: true, status: "not_found", message: "İşletme bulunamadı" });
+    return res
+      .status(404)
+      .json({ success: true, status: "not_found", message: "İşletme bulunamadı" });
   } catch (err) {
-    return res.status(500).json({ success: false, status: "error", message: "Detail error", error: err.message });
+    return res.status(500).json({
+      success: false,
+      status: "error",
+      message: "Detail error",
+      error: err.message,
+    });
   }
 });
 
