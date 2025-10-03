@@ -25,6 +25,7 @@ import VerifyEmail from "./pages/VerifyEmail";
 import Results from "./pages/Results";
 import SapancaBungalov from "./pages/SapancaBungalov";
 import BlacklistProfile from "./pages/BlacklistProfile";
+import AdminContent from "./pages/AdminContent";
 
 /* ===================== URL Normalization (assets only) ===================== */
 function normalizeAssetPath(p) {
@@ -154,6 +155,7 @@ const router = createBrowserRouter(
         { path: "admin/dashboard", element: <Dashboard /> },
         { path: "admin", element: <NotFound /> },
         { path: "*", element: <NotFound /> },
+        { path: "admin/content", element: <AdminContent /> },
       ],
     },
   ],

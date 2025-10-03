@@ -1,17 +1,18 @@
 // frontend/src/pages/Dashboard.jsx
-import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
 import axios from "axios";
 
 /**
- * Yönetim Paneli — ULTRA PRO
- * - Tek axios instance, otomatik Authorization & 401 redirect
- * - /api/admin/* ⇒ hata durumunda /api/* fallback (eski backend desteği)
- * - Debounced arama, client-side sıralama & sayfalama
- * - UI tercihlerini saklama (tab, arama, sıralama, sayfa, filtre)
- * - CSV (UTF-8 BOM, Excel dostu), kısayollar (/ odak, r yenile)
- * - Offline uyarısı, toast bildirimleri, detay çekmecesi + galeri yönetimi
+ * Yönetim Paneli — ULTRA PRO v3.4
+ * - Tek axios instance, otomatik Authorization & kontrollü 401 redirect
+ * - /api/admin/* ⇒ hata durumunda /api/* ve diğer muhtemel legacy rotalara akıllı fallback (multiGet)
+ * - Debounced arama, gelişmiş sıralama (tarih/sayı metriklerini de doğru sıralar) & sayfalama
+ * - UI tercihlerini saklama (tab, arama, sıralama, sayfa, filtre, sütun görünürlüğü)
+ * - CSV (UTF-8 BOM), kısayollar (/ odak, r yenile, Alt+←/→ sayfa)
+ * - AbortController ile yarış/iptal koruması, offline uyarısı, toast
+ * - Detay çekmecesi + galeri yönetimi (tip/limit guard)
  * - ✅ Öne Çıkanlar (Sponsor) yönetimi (place/type/weight/until) + işletmeden hızlı “⭐ Öne çıkar”
- * - ✅ Tablo: toplu seçim (export/sil), sütun görünürlüğü, yapışkan başlık/foot
+ * - ✅ Admin erişimi yoksa sadece Featured yüklenir ve net uyarı verilir
  */
 
 export default function Dashboard() {
@@ -31,18 +32,21 @@ export default function Dashboard() {
         localStorage.getItem("token") ||
         "";
       if (t) cfg.headers.Authorization = `Bearer ${t}`;
-
-      // admin key (opsiyonel)
       const adminKey = localStorage.getItem("ADMIN_KEY");
       if (adminKey) cfg.headers["x-admin-key"] = adminKey;
       return cfg;
     });
-    // Response interceptor: 401'de login'e yönlendir
+    // Response interceptor: 401'de kontrollü redirect
     inst.interceptors.response.use(
       (r) => r,
       (err) => {
-        if (err?.response?.status === 401) {
-          window.location.href = "/admin/login";
+        const status = err?.response?.status;
+        const path = err?.config?.url || "";
+        if (status === 401) {
+          // Sadece yetki gerektiren kritik isteklerde login'e yönlendir
+          if (/\/api\/auth\/me/.test(path) || /\/api\/admin\//.test(path)) {
+            window.location.href = "/admin/login";
+          }
         }
         return Promise.reject(err);
       }
@@ -53,13 +57,9 @@ export default function Dashboard() {
   const url = (p) => `${API_BASE}${p.startsWith("/") ? p : `/${p}`}`;
 
   /* ==================== UI State ==================== */
-  const UI_KEY = "dash.ui.v3"; // v3 (kolon görünürlüğü & featured tab eklendi)
+  const UI_KEY = "dash.ui.v3"; // schema v3 (kolon görünürlüğü dahil)
   const saved = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(UI_KEY) || "{}");
-    } catch {
-      return {};
-    }
+    try { return JSON.parse(localStorage.getItem(UI_KEY) || "{}"); } catch { return {}; }
   })();
 
   const [activeTab, setActiveTab] = useState(saved.activeTab || "businesses");
@@ -95,22 +95,12 @@ export default function Dashboard() {
 
   // form & edit
   const [form, setForm] = useState({
-    name: "",
-    type: "",
-    instagramUsername: "",
-    instagramUrl: "",
-    phone: "",
-    address: "",
+    name: "", type: "", instagramUsername: "", instagramUrl: "", phone: "", address: "",
   });
   const [editId, setEditId] = useState(null);
 
-  // featured quick-add state (çekmecede de kullanılıyor)
-  const [featForm, setFeatForm] = useState({
-    place: "Sapanca",
-    type: "bungalov",
-    weight: 100,
-    days: 30,
-  });
+  // featured quick-add state
+  const [featForm, setFeatForm] = useState({ place: "Sapanca", type: "bungalov", weight: 100, days: 30 });
 
   // ui ops
   const [loading, setLoading] = useState(false);
@@ -120,23 +110,34 @@ export default function Dashboard() {
   const [toast, setToast] = useState(""); // ephemeral
   const searchRef = useRef(null);
 
+  // request cancel / race guard
+  const refreshAbortRef = useRef(null);
+  const mountedRef = useRef(true);
+  const adminOKRef = useRef(true); // 401/403 sonrası kısa süreli admin kapatma (cooldown)
+  const initRef = useRef(false);   // React StrictMode'da çift mount'a karşı guard
+
+  // access state
+  const [me, setMe] = useState(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+
   // persist UI
   useEffect(() => {
-    const st = {
-      activeTab, search, statusFilter, sort, page, pageSize, colVis,
-    };
+    const st = { activeTab, search, statusFilter, sort, page, pageSize, colVis };
     localStorage.setItem(UI_KEY, JSON.stringify(st));
   }, [activeTab, search, statusFilter, sort, page, pageSize, colVis]);
 
-  // offline/online
+  // mount/unmount + online/offline
   useEffect(() => {
+    mountedRef.current = true;
     const on = () => setOffline(false);
     const off = () => setOffline(true);
     window.addEventListener("online", on);
     window.addEventListener("offline", off);
     return () => {
+      mountedRef.current = false;
       window.removeEventListener("online", on);
       window.removeEventListener("offline", off);
+      try { refreshAbortRef.current?.abort(); } catch {}
     };
   }, []);
 
@@ -149,9 +150,13 @@ export default function Dashboard() {
         searchRef.current?.focus();
       }
       if (!e.ctrlKey && !e.metaKey && k === "r") {
-        // sayfayı yenilemeden veriyi yenile
         e.preventDefault();
         refreshAll();
+      }
+      if (e.altKey && (k === "arrowleft" || k === "arrowright")) {
+        e.preventDefault();
+        if (k === "arrowleft") setPage((p) => Math.max(1, p - 1));
+        else setPage((p) => p + 1);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -163,32 +168,85 @@ export default function Dashboard() {
     setTimeout(() => setToast(""), 1600);
   };
 
-  /* ==================== API helpers ==================== */
+  /* ==================== Helpers ==================== */
   const tryAdminThenPublic = async (adminCall, fallbackCall) => {
+    // Admin yolunu sadece izin varken dene; 401/403 görürsek bir süre public'e düş.
+    if (adminOKRef.current) {
+      try {
+        return await adminCall();
+      } catch (e) {
+        const st = e?.response?.status;
+        if (st === 401 || st === 403) {
+          adminOKRef.current = false;
+          // 60 saniye sonra tekrar admin denemelerine izin ver
+          setTimeout(() => { adminOKRef.current = true; }, 60_000);
+        }
+        return await fallbackCall();
+      }
+    }
+    // Admin kapalıysa direkt public'e git
+    return await fallbackCall();
+  };
+
+  // Çoklu rota dene: 404'lerde sıradakine geç, 401/403'te dur
+  const multiGet = async (paths, opts = {}) => {
+    let lastErr;
+    for (const p of paths) {
+      try {
+        const r = await http.get(p, opts);
+        if (r?.status === 200) return r;
+      } catch (e) {
+        const code = e?.response?.status;
+        lastErr = e;
+        if (code === 404) continue; // sıradaki adayı dene
+        if (code === 401 || code === 403) throw e; // yetki yoksa dur
+      }
+    }
+    throw lastErr || new Error("AllFailed");
+  };
+
+  const timeOr = (v) => {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : null;
+  };
+
+  /* ==================== Access guard ==================== */
+  const ensureAccess = async (signal) => {
     try {
-      return await adminCall();
-    } catch {
-      return await fallbackCall();
+      const { data } = await http.get("/api/auth/me", { signal });
+      setMe(data);
+      const key = !!localStorage.getItem("ADMIN_KEY");
+      const adminRole = data?.role === "admin" || data?.isAdmin === true || (Array.isArray(data?.roles) && data.roles.includes("admin"));
+      const ok = key || adminRole;
+      setIsAdmin(!!ok);
+      return ok;
+    } catch (e) {
+      const ok = !!localStorage.getItem("ADMIN_KEY");
+      setIsAdmin(ok);
+      return ok;
     }
   };
 
-  // Tüm /businesses sayfalarını çekip birleştirir
-  const fetchBusinesses = async () => {
+  /* ==================== Fetchers (with Abort signal) ==================== */
+  // /businesses: tüm sayfaları çekip birleştirir
+  const fetchBusinesses = async (signal) => {
     const LIMIT = 200;
-    const call = (page = 1) =>
-      tryAdminThenPublic(
-        () => http.get("/api/admin/businesses", { params: { page, limit: LIMIT } }),
-        () => http.get("/api/businesses", { params: { page, limit: LIMIT } })
-      );
+    const call = (page = 1) => {
+      const q = `?page=${page}&limit=${LIMIT}`;
+      return multiGet([
+        `/api/admin/businesses${q}`,
+        `/api/businesses${q}`,
+      ], { signal });
+    };
 
-    const { data: first } = await call(1);
+    const first = await call(1);
     const pick = (d) => d.items || d.businesses || [];
 
-    let items = pick(first);
+    let items = pick(first.data);
     const totalPages =
-      first.pages ??
-      (first.total && (first.limit || LIMIT)
-        ? Math.ceil(first.total / (first.limit || LIMIT))
+      first.data.pages ??
+      (first.data.total && (first.data.limit || LIMIT)
+        ? Math.ceil(first.data.total / (first.data.limit || LIMIT))
         : 1);
 
     if (totalPages > 1) {
@@ -197,54 +255,54 @@ export default function Dashboard() {
       );
       for (const r of rest) items = items.concat(pick(r.data));
     }
-
-    setBusinesses(items);
+    if (mountedRef.current) setBusinesses(items);
   };
 
-  // Başvurular
   const normalizeRequests = (data) => {
-    // Admin API: { success, requests: [...] }
     const list = data?.requests || data?.items;
     if (Array.isArray(list)) {
       const pending = list.filter((x) => (x.status || "pending") === "pending");
-      const archived = list.filter((x) =>
-        ["approved", "rejected"].includes(x.status)
-      );
+      const archived = list.filter((x) => ["approved", "rejected"].includes(x.status));
       return { pending, archived };
     }
-    // Legacy API: { pending:[], approved:[], rejected:[] }
-    return {
-      pending: data?.pending || [],
-      archived: [...(data?.approved || []), ...(data?.rejected || [])],
-    };
+    return { pending: data?.pending || [], archived: [...(data?.approved || []), ...(data?.rejected || [])] };
   };
 
-  const fetchRequests = async () => {
-    const { data } = await tryAdminThenPublic(
-      () => http.get("/api/admin/requests"),
-      () => http.get("/api/apply")
-    );
+  const fetchRequests = async (signal) => {
+    const { data } = await multiGet([
+      "/api/admin/requests",   // yeni backend
+      "/api/requests",         // muhtemel legacy
+      "/api/apply/all",        // bazı dağıtımlarda listeleme burada
+      "/api/apply",            // en eski fallback
+    ], { signal });
     const norm = normalizeRequests(data);
+    if (!mountedRef.current) return;
     setPending(norm.pending);
     setArchived(norm.archived);
   };
 
-  const fetchReports = async () => {
-    const { data } = await http.get("/api/report");
-    setReports(data.reports || []);
+  const fetchReports = async (signal) => {
+    const { data } = await multiGet([
+      "/api/admin/report",
+      "/api/report",
+    ], { signal });
+    if (mountedRef.current) setReports(data.reports || data.items || []);
   };
 
-  const fetchBlacklist = async () => {
-    const { data } = await http.get("/api/report/blacklist/all");
-    setBlacklist(data.blacklist || []);
+  const fetchBlacklist = async (signal) => {
+    const { data } = await multiGet([
+      "/api/admin/report/blacklist/all",
+      "/api/report/blacklist/all",
+    ], { signal });
+    if (mountedRef.current) setBlacklist(data.blacklist || data.items || []);
   };
 
   // ✅ Öne Çıkanlar
-  const fetchFeatured = async () => {
+  const fetchFeatured = async (signal) => {
     try {
       const { data } = await tryAdminThenPublic(
-        () => http.get("/api/admin/featured", { params: {} }),
-        () => http.get("/api/featured", { params: {} })
+        () => http.get("/api/admin/featured", { params: {}, signal }),
+        () => http.get("/api/featured", { params: {}, signal })
       );
       const items = (data?.items || data || []).map((x) => ({
         _id: x._id,
@@ -255,34 +313,68 @@ export default function Dashboard() {
         weight: Number(x.weight ?? 0),
         until: x.until,
       }));
-      setFeatured(items);
+      if (mountedRef.current) setFeatured(items);
     } catch {
-      setFeatured([]); // endpoint yoksa sessiz
+      if (mountedRef.current) setFeatured([]); // endpoint yoksa sessiz
     }
   };
 
   const refreshAll = async () => {
     try {
+      // önceki istekleri iptal et
+      try { refreshAbortRef.current?.abort(); } catch {}
+      const ctrl = new AbortController();
+      refreshAbortRef.current = ctrl;
+
       setLoading(true);
       setErrMsg("");
-      await Promise.all([
-        fetchBusinesses(),
-        fetchRequests(),
-        fetchReports(),
-        fetchBlacklist(),
-        fetchFeatured(),
-      ]);
-      flash("✓ Güncellendi");
+
+      const adminOK = await ensureAccess(ctrl.signal);
+
+      const jobs = [];
+      if (adminOK) {
+        jobs.push(
+          fetchBusinesses(ctrl.signal),
+          fetchRequests(ctrl.signal),
+          fetchReports(ctrl.signal),
+          fetchBlacklist(ctrl.signal)
+        );
+      } else {
+        // admin verilerini temizle & mesaj
+        setBusinesses([]);
+        setPending([]);
+        setArchived([]);
+        setReports([]);
+        setBlacklist([]);
+        setErrMsg("Yönetim verilerine erişim için admin yetkisi gerekli. Sadece 'Öne Çıkanlar' yükleniyor.");
+      }
+      jobs.push(fetchFeatured(ctrl.signal));
+
+      await Promise.all(jobs);
+      if (mountedRef.current) flash("✓ Güncellendi");
     } catch (e) {
-      setErrMsg(e?.response?.data?.message || "Veriler alınamadı.");
+      if (mountedRef.current) {
+        const code = e?.response?.status;
+        if (code === 401 || code === 403) {
+          setErrMsg("Yetki hatası: Admin oturumu ya da ADMIN_KEY gerekli.");
+        } else if (code === 404) {
+          setErrMsg("Bazı rotalar bulunamadı (404). Fallback denendi; yine de eksik rota olabilir.");
+        } else if (e?.name === "CanceledError") {
+          // no-op
+        } else {
+          setErrMsg(e?.response?.data?.message || "Veriler alınamadı.");
+        }
+      }
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (initRef.current) return; // StrictMode'da ikinci çağrıyı yut
+    initRef.current = true;
     refreshAll();
-    // eslint-disable-next-line
+    /* eslint-disable-next-line */
   }, []);
 
   /* ==================== CRUD: Businesses ==================== */
@@ -302,16 +394,9 @@ export default function Dashboard() {
         );
         flash("✓ İşletme eklendi");
       }
-      setForm({
-        name: "",
-        type: "",
-        instagramUsername: "",
-        instagramUrl: "",
-        phone: "",
-        address: "",
-      });
+      setForm({ name: "", type: "", instagramUsername: "", instagramUrl: "", phone: "", address: "" });
       setEditId(null);
-      await fetchBusinesses();
+      await fetchBusinesses(refreshAbortRef.current?.signal);
     } catch (e) {
       alert(e?.response?.data?.message || "Kaydetme hatası");
     }
@@ -332,14 +417,13 @@ export default function Dashboard() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm("Bu işletmeyi silmek istediğinizden emin misiniz?"))
-      return;
+    if (!window.confirm("Bu işletmeyi silmek istediğinizden emin misiniz?")) return;
     await tryAdminThenPublic(
       () => http.delete(`/api/admin/businesses/${id}`),
       () => http.delete(`/api/businesses/${id}`)
     );
     flash("✓ Silindi");
-    await fetchBusinesses();
+    await fetchBusinesses(refreshAbortRef.current?.signal);
   };
 
   /* =========== Business Gallery (tip/limit guard) ============ */
@@ -351,21 +435,13 @@ export default function Dashboard() {
 
     // max 5
     const cur = (drawerItem?.data?.gallery || []).length;
-    if (cur + files.length > 5) {
-      return alert("Galeri limiti 5 görseldir.");
-    }
+    if (cur + files.length > 5) return alert("Galeri limiti 5 görseldir.");
 
     const fd = new FormData();
     files.forEach((f) => fd.append("images", f));
 
-    const req = () =>
-      http.post(`/api/admin/businesses/${id}/gallery`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
-    const reqFallback = () =>
-      http.post(`/api/businesses/${id}/gallery`, fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+    const req = () => http.post(`/api/admin/businesses/${id}/gallery`, fd, { headers: { "Content-Type": "multipart/form-data" } });
+    const reqFallback = () => http.post(`/api/businesses/${id}/gallery`, fd, { headers: { "Content-Type": "multipart/form-data" } });
 
     const { data } = await tryAdminThenPublic(req, reqFallback);
 
@@ -374,15 +450,13 @@ export default function Dashboard() {
         ? { ...prev, data: { ...prev.data, gallery: data.gallery || [] } }
         : prev
     );
-    await fetchBusinesses();
+    await fetchBusinesses(refreshAbortRef.current?.signal);
     flash("✓ Yüklendi");
   };
 
   const removeGalleryItem = async (id, index) => {
     const doDel = () => http.delete(`/api/admin/businesses/${id}/gallery/${index}`);
-    const doDelFallback = () =>
-      http.delete(`/api/businesses/${id}/gallery/${index}`);
-
+    const doDelFallback = () => http.delete(`/api/businesses/${id}/gallery/${index}`);
     const { data } = await tryAdminThenPublic(doDel, doDelFallback);
 
     setDrawerItem((prev) =>
@@ -390,7 +464,7 @@ export default function Dashboard() {
         ? { ...prev, data: { ...prev.data, gallery: data.gallery || [] } }
         : prev
     );
-    await fetchBusinesses();
+    await fetchBusinesses(refreshAbortRef.current?.signal);
     flash("✓ Kaldırıldı");
   };
 
@@ -400,7 +474,7 @@ export default function Dashboard() {
       () => http.post(`/api/admin/requests/${id}/approve`, {}),
       () => http.post(`/api/apply/${id}/approve`, {})
     );
-    await Promise.all([fetchBusinesses(), fetchRequests()]);
+    await Promise.all([fetchBusinesses(refreshAbortRef.current?.signal), fetchRequests(refreshAbortRef.current?.signal)]);
     flash("✓ Başvuru onaylandı ve işletme oluşturuldu!");
     closeDrawer();
   };
@@ -410,7 +484,7 @@ export default function Dashboard() {
       () => http.post(`/api/admin/requests/${id}/reject`, {}),
       () => http.post(`/api/apply/${id}/reject`, {})
     );
-    await fetchRequests();
+    await fetchRequests(refreshAbortRef.current?.signal);
     flash("✓ Başvuru reddedildi");
     closeDrawer();
   };
@@ -418,14 +492,14 @@ export default function Dashboard() {
   /* ================= Reports actions ================== */
   const handleReportApprove = async (id) => {
     await http.post(`/api/report/${id}/approve`, {});
-    await Promise.all([fetchReports(), fetchBlacklist()]);
+    await Promise.all([fetchReports(refreshAbortRef.current?.signal), fetchBlacklist(refreshAbortRef.current?.signal)]);
     flash("✓ İhbar onaylandı");
     closeDrawer();
   };
 
   const handleReportReject = async (id) => {
     await http.post(`/api/report/${id}/reject`, {});
-    await fetchReports();
+    await fetchReports(refreshAbortRef.current?.signal);
     flash("✓ İhbar reddedildi");
     closeDrawer();
   };
@@ -433,7 +507,7 @@ export default function Dashboard() {
   const handleReportDelete = async (id) => {
     if (!window.confirm("Bu ihbarı silmek istediğinizden emin misiniz?")) return;
     await http.delete(`/api/report/${id}`);
-    await fetchReports();
+    await fetchReports(refreshAbortRef.current?.signal);
     flash("✓ İhbar silindi");
     closeDrawer();
   };
@@ -443,14 +517,14 @@ export default function Dashboard() {
     const newName = prompt("Yeni Ad:", b.name);
     if (!newName) return;
     await http.put(`/api/report/blacklist/${b._id}`, { ...b, name: newName });
-    await fetchBlacklist();
+    await fetchBlacklist(refreshAbortRef.current?.signal);
     flash("✓ Blacklist güncellendi");
   };
 
   const handleBlacklistDelete = async (id) => {
     if (!window.confirm("Bu işletmeyi kara listeden silmek istediğinizden emin misiniz?")) return;
     await http.delete(`/api/report/blacklist/${id}`);
-    await fetchBlacklist();
+    await fetchBlacklist(refreshAbortRef.current?.signal);
     flash("✓ Blacklist kaydı silindi");
   };
 
@@ -461,7 +535,7 @@ export default function Dashboard() {
       () => http.post("/api/admin/featured", payload),
       () => http.post("/api/featured", payload)
     );
-    await fetchFeatured();
+    await fetchFeatured(refreshAbortRef.current?.signal);
     flash("✓ Öne çıkarıldı");
   };
 
@@ -482,7 +556,7 @@ export default function Dashboard() {
       () => http.put(`/api/admin/featured/${id}`, patch),
       () => http.put(`/api/featured/${id}`, patch)
     );
-    await fetchFeatured();
+    await fetchFeatured(refreshAbortRef.current?.signal);
     flash("✓ Sponsor güncellendi");
   };
 
@@ -492,7 +566,7 @@ export default function Dashboard() {
       () => http.delete(`/api/admin/featured/${id}`),
       () => http.delete(`/api/featured/${id}`)
     );
-    await fetchFeatured();
+    await fetchFeatured(refreshAbortRef.current?.signal);
     flash("✓ Sponsor silindi");
   };
 
@@ -506,90 +580,56 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [search]);
 
+  const normalizeForSort = (val) => {
+    if (val == null) return "";
+    if (typeof val === "number") return val;
+    const s = String(val).trim();
+    const t = timeOr(s);
+    if (t) return t;
+    const n = Number(s.replace(/[^\d.-]/g, ""));
+    if (Number.isFinite(n) && /(^-?\d+([.,]\d+)?$)/.test(s.replace(",", "."))) return n;
+    return s.toLowerCase();
+  };
+
+  const cmp = (a, b) => (a === b ? 0 : a > b ? 1 : -1);
+
   const filterSort = (rows, keys = []) => {
     let r = rows;
     if (statusFilter !== "all") {
       r = r.filter((x) => (x.status || "pending") === statusFilter);
     }
     if (debouncedSearch.trim()) {
-      r = r.filter((row) =>
-        keys.some((k) => lowerIncludes(row[k] ?? "", debouncedSearch))
-      );
+      r = r.filter((row) => keys.some((k) => lowerIncludes(row[k] ?? "", debouncedSearch)));
     }
     if (sort.key) {
       const dir = sort.dir === "asc" ? 1 : -1;
       r = [...r].sort((a, b) => {
-        const va = (a[sort.key] ?? "").toString().toLowerCase();
-        const vb = (b[sort.key] ?? "").toString().toLowerCase();
-        if (va < vb) return -1 * dir;
-        if (va > vb) return 1 * dir;
-        return 0;
+        const va = normalizeForSort(a[sort.key]);
+        const vb = normalizeForSort(b[sort.key]);
+        return cmp(va, vb) * dir;
       });
     }
     return r;
   };
 
   const businessesView = useMemo(
-    () =>
-      filterSort(businesses, [
-        "name",
-        "type",
-        "phone",
-        "instagramUsername",
-        "instagramUrl",
-        "address",
-      ]),
+    () => filterSort(businesses, ["name", "type", "phone", "instagramUsername", "instagramUrl", "address"]),
     [businesses, debouncedSearch, sort, statusFilter]
   );
   const pendingView = useMemo(
-    () =>
-      filterSort(pending, [
-        "name",
-        "type",
-        "instagramUsername",
-        "instagramUrl",
-        "phone",
-        "address",
-        "email",
-        "status",
-      ]),
+    () => filterSort(pending, ["name", "type", "instagramUsername", "instagramUrl", "phone", "address", "email", "status"]),
     [pending, debouncedSearch, sort, statusFilter]
   );
   const archivedView = useMemo(
-    () =>
-      filterSort(archived, [
-        "name",
-        "type",
-        "instagramUsername",
-        "instagramUrl",
-        "phone",
-        "address",
-        "email",
-        "status",
-      ]),
+    () => filterSort(archived, ["name", "type", "instagramUsername", "instagramUrl", "phone", "address", "email", "status"]),
     [archived, debouncedSearch, sort, statusFilter]
   );
   const reportsView = useMemo(
-    () =>
-      filterSort(reports, [
-        "name",
-        "instagramUsername",
-        "instagramUrl",
-        "phone",
-        "desc",
-        "status",
-      ]),
+    () => filterSort(reports, ["name", "instagramUsername", "instagramUrl", "phone", "desc", "status"]),
     [reports, debouncedSearch, sort, statusFilter]
   );
   const blacklistView = useMemo(
-    () =>
-      filterSort(blacklist, [
-        "name",
-        "instagramUsername",
-        "instagramUrl",
-        "phone",
-        "desc",
-      ]),
+    () => filterSort(blacklist, ["name", "instagramUsername", "instagramUrl", "phone", "desc"]),
     [blacklist, debouncedSearch, sort, statusFilter]
   );
   const featuredView = useMemo(
@@ -602,7 +642,7 @@ export default function Dashboard() {
             businesses.find((b) => b._id === f.businessId)?.name ||
             "(işletme)",
         })),
-        ["name", "place", "type"]
+        ["name", "place", "type", "weight", "until"]
       ),
     [featured, businesses, debouncedSearch, sort, statusFilter]
   );
@@ -632,18 +672,13 @@ export default function Dashboard() {
       .map((r) =>
         cols
           .map((c) => {
-            const v =
-              (typeof c.accessor === "function"
-                ? c.accessor(r)
-                : r[c.accessor]) ?? "";
+            const v = (typeof c.accessor === "function" ? c.accessor(r) : r[c.accessor]) ?? "";
             return `"${(v + "").replace(/"/g, '""')}"`;
           })
           .join(",")
       )
       .join("\n");
-    const blob = new Blob(["\ufeff" + head + "\n" + body], {
-      type: "text/csv;charset=utf-8;",
-    });
+    const blob = new Blob(["\ufeff" + head + "\n" + body], { type: "text/csv;charset=utf-8;" });
     const dl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = dl;
@@ -653,14 +688,8 @@ export default function Dashboard() {
   };
 
   /* ================= Drawer ops ================= */
-  const openDrawer = (type, data) => {
-    setDrawerItem({ type, data });
-    setDrawerOpen(true);
-  };
-  const closeDrawer = () => {
-    setDrawerOpen(false);
-    setTimeout(() => setDrawerItem(null), 200);
-  };
+  const openDrawer = (type, data) => { setDrawerItem({ type, data }); setDrawerOpen(true); };
+  const closeDrawer = () => { setDrawerOpen(false); setTimeout(() => setDrawerItem(null), 200); };
 
   // theme
   const T = {
@@ -690,10 +719,7 @@ export default function Dashboard() {
 
   // kolon toggle helper
   const toggleCol = (tab, key) =>
-    setColVis((cv) => ({
-      ...cv,
-      [tab]: { ...(cv[tab] || {}), [key]: !cv[tab]?.[key] },
-    }));
+    setColVis((cv) => ({ ...cv, [tab]: { ...(cv[tab] || {}), [key]: !cv[tab]?.[key] } }));
 
   // toplu işlemler
   const bulkSelectionIds = Array.from(selection);
@@ -707,48 +733,24 @@ export default function Dashboard() {
       );
     }
     setSelection(new Set());
-    await fetchBusinesses();
+    await fetchBusinesses(refreshAbortRef.current?.signal);
     flash("✓ Toplu silme tamam");
   };
 
   return (
-    <div
-      style={{
-        padding: 18,
-        fontFamily: "Inter, Segoe UI, system-ui, sans-serif",
-        color: T.text,
-      }}
-    >
+    <div style={{ padding: 18, fontFamily: "Inter, Segoe UI, system-ui, sans-serif", color: T.text }}>
       {/* Sticky glass header */}
       <div
         style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 10,
-          padding: 12,
-          margin: "-12px -12px 16px",
-          backdropFilter: "saturate(180%) blur(8px)",
-          background: T.glass,
-          borderBottom: `1px solid ${T.glassBorder}`,
+          position: "sticky", top: 0, zIndex: 10, padding: 12, margin: "-12px -12px 16px",
+          backdropFilter: "saturate(180%) blur(8px)", background: T.glass, borderBottom: `1px solid ${T.glassBorder}`,
         }}
       >
-        <div
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <div
             style={{
-              display: "flex",
-              gap: 8,
-              background: T.card,
-              padding: 6,
-              border: `1px solid ${T.border}`,
-              borderRadius: T.radius,
-              boxShadow: T.shadow,
+              display: "flex", gap: 8, background: T.card, padding: 6, border: `1px solid ${T.border}`,
+              borderRadius: T.radius, boxShadow: T.shadow,
             }}
           >
             <Tab label="📋 İşletmeler" id="businesses" active={activeTab} onClick={setActiveTab} />
@@ -936,14 +938,7 @@ export default function Dashboard() {
       </div>
 
       {errMsg && (
-        <div
-          style={{
-            ...alert(T),
-            background: "#fef2f2",
-            borderColor: "#fecaca",
-            color: "#991b1b",
-          }}
-        >
+        <div style={{ ...alert(T), background: "#fef2f2", borderColor: "#fecaca", color: "#991b1b" }}>
           {errMsg}
         </div>
       )}
@@ -1026,7 +1021,7 @@ export default function Dashboard() {
                 key: "instagramUrl",
                 label: "Instagram URL",
                 width: 220,
-                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : "-"),
+                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer noopener">{v}</a> : "-"),
               } : null,
               colVis.businesses?.address ? { key: "address", label: "Adres", flex: 1 } : null,
               {
@@ -1039,7 +1034,6 @@ export default function Dashboard() {
                     <button type="button" onClick={() => openDrawer("business", row)} style={btnNeutralSm(T)}>🔍 Detay</button>
                     <button type="button" onClick={() => handleEdit(row)} style={btnOrangeSm(T)}>✏️ Düzenle</button>
                     <button type="button" onClick={() => handleDelete(row._id)} style={btnDeleteSm(T)}>🗑️ Sil</button>
-                    {/* hızlı öne çıkar */}
                     <button
                       type="button"
                       onClick={() => quickFeatureFromBusiness(row)}
@@ -1080,7 +1074,7 @@ export default function Dashboard() {
                 key: "instagramUrl",
                 label: "IG URL",
                 width: 220,
-                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : "-"),
+                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer noopener">{v}</a> : "-"),
               },
               colVis.requests?.phone ? { key: "phone", label: "Telefon", width: 130 } : null,
               colVis.requests?.address ? { key: "address", label: "Adres", flex: 1 } : null,
@@ -1128,7 +1122,7 @@ export default function Dashboard() {
                 key: "instagramUrl",
                 label: "IG URL",
                 width: 220,
-                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : "-"),
+                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer noopener">{v}</a> : "-"),
               },
               colVis.archived?.phone ? { key: "phone", label: "Telefon", width: 130 } : null,
               colVis.archived?.address ? { key: "address", label: "Adres", flex: 1 } : null,
@@ -1162,10 +1156,18 @@ export default function Dashboard() {
                 key: "instagramUrl",
                 label: "IG URL",
                 width: 220,
-                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : "-"),
+                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer noopener">{v}</a> : "-"),
               },
               colVis.reports?.phone ? { key: "phone", label: "Telefon", width: 130 } : null,
-              colVis.reports?.desc ? { key: "desc", label: "Açıklama", flex: 1, render: (v) => (v || "").slice(0, 120) + ((v || "").length > 120 ? "…" : "") } : null,
+              colVis.reports?.desc ? {
+                key: "desc",
+                label: "Açıklama",
+                flex: 1,
+                render: (v) => {
+                  const s = v || "";
+                  return s.length > 120 ? s.slice(0, 120) + "…" : s;
+                },
+              } : null,
               { key: "status", label: "Durum", width: 120, render: (v) => <StatusPill v={v || "pending"} /> },
               {
                 key: "_actions",
@@ -1247,7 +1249,12 @@ export default function Dashboard() {
               colVis.featured?.place ? { key: "place", label: "Yer", width: 140 } : null,
               colVis.featured?.type ? { key: "type", label: "Tür", width: 140 } : null,
               colVis.featured?.weight ? { key: "weight", label: "Ağırlık", width: 100 } : null,
-              colVis.featured?.until ? { key: "until", label: "Bitiş", width: 160 } : null,
+              colVis.featured?.until ? {
+                key: "until",
+                label: "Bitiş",
+                width: 180,
+                render: (v) => (v ? new Date(v).toLocaleString("tr-TR") : "-"),
+              } : null,
               {
                 key: "_actions",
                 label: "İşlem",
@@ -1312,7 +1319,7 @@ export default function Dashboard() {
                 key: "instagramUrl",
                 label: "IG URL",
                 width: 220,
-                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer">{v}</a> : "-"),
+                render: (v) => (v ? <a href={v} target="_blank" rel="noreferrer noopener">{v}</a> : "-"),
               },
               colVis.blacklist?.phone ? { key: "phone", label: "Telefon", width: 130 } : null,
               colVis.blacklist?.desc ? { key: "desc", label: "Açıklama", flex: 1 } : null,
@@ -1390,10 +1397,9 @@ export default function Dashboard() {
     </div>
   );
 }
-
 /* ========================= Alt Bileşenler ========================= */
 
-function Tab({ label, id, active, onClick }) {
+const Tab = memo(function Tab({ label, id, active, onClick }) {
   const isActive = active === id;
   return (
     <button
@@ -1412,9 +1418,9 @@ function Tab({ label, id, active, onClick }) {
       {label}
     </button>
   );
-}
+});
 
-function StatusPill({ v }) {
+const StatusPill = memo(function StatusPill({ v }) {
   const map = { pending: "#fde68a", approved: "#bbf7d0", rejected: "#fecaca" };
   const text = { pending: "#92400e", approved: "#065f46", rejected: "#991b1b" };
   return (
@@ -1431,9 +1437,9 @@ function StatusPill({ v }) {
       {v}
     </span>
   );
-}
+});
 
-function SmartTable({
+const SmartTable = memo(function SmartTable({
   loading,
   sort,
   setSort,
@@ -1565,8 +1571,7 @@ function SmartTable({
                   key={ri}
                   onClick={(e) => {
                     const tag = (e.target.tagName || "").toLowerCase();
-                    if (tag === "button" || tag === "a" || e.target.closest("button"))
-                      return;
+                    if (tag === "button" || tag === "a" || e.target.closest("button")) return;
                     onRowClick?.(row);
                   }}
                   style={{
@@ -1648,11 +1653,7 @@ function SmartTable({
             type="button"
             onClick={() => canPrev && setPage?.(page - 1)}
             disabled={!canPrev}
-            style={{
-              ...btnNeutralSm(T),
-              opacity: canPrev ? 1 : 0.6,
-              cursor: canPrev ? "pointer" : "not-allowed",
-            }}
+            style={{ ...btnNeutralSm(T), opacity: canPrev ? 1 : 0.6, cursor: canPrev ? "pointer" : "not-allowed" }}
           >
             ←
           </button>
@@ -1663,11 +1664,7 @@ function SmartTable({
             type="button"
             onClick={() => canNext && setPage?.(page + 1)}
             disabled={!canNext}
-            style={{
-              ...btnNeutralSm(T),
-              opacity: canNext ? 1 : 0.6,
-              cursor: canNext ? "pointer" : "not-allowed",
-            }}
+            style={{ ...btnNeutralSm(T), opacity: canNext ? 1 : 0.6, cursor: canNext ? "pointer" : "not-allowed" }}
           >
             →
           </button>
@@ -1675,7 +1672,7 @@ function SmartTable({
       </div>
     </div>
   );
-}
+});
 
 function DetailsDrawer({ open, onClose, type, data, actions, T }) {
   const files =
@@ -1706,12 +1703,8 @@ function DetailsDrawer({ open, onClose, type, data, actions, T }) {
       <div style={{ color: T.sub, minWidth: 160, fontSize: 12 }}>{k}</div>
       <div style={{ flex: 1, textAlign: "right", wordBreak: "break-word" }}>
         {typeof v === "string" && /^https?:\/\//i.test(v) ? (
-          <a href={v} target="_blank" rel="noreferrer">
-            {v}
-          </a>
-        ) : (
-          v ?? "-"
-        )}
+          <a href={v} target="_blank" rel="noreferrer noopener">{v}</a>
+        ) : (v ?? "-")}
       </div>
       {copyable && (
         <button
@@ -1774,9 +1767,7 @@ function DetailsDrawer({ open, onClose, type, data, actions, T }) {
             {isBusiness && "İşletme Detayı"}
             {isBlacklist && "Blacklist Kaydı"}
           </div>
-          <button type="button" onClick={onClose} style={btnNeutralSm(T)}>
-            ✖
-          </button>
+          <button type="button" onClick={onClose} style={btnNeutralSm(T)}>✖</button>
         </div>
 
         <div style={{ padding: 16, overflowY: "auto" }}>
@@ -1841,12 +1832,8 @@ function DetailsDrawer({ open, onClose, type, data, actions, T }) {
                         }}
                       />
                       <div style={{ position: "absolute", right: 4, bottom: 4, display: "flex", gap: 6 }}>
-                        <a href={u} target="_blank" rel="noreferrer" style={btnNeutralTiny(T)}>
-                          Aç
-                        </a>
-                        <button type="button" onClick={() => actions.removeGalleryItem(data._id, i)} style={btnDeleteSm(T)}>
-                          Sil
-                        </button>
+                        <a href={u} target="_blank" rel="noreferrer" style={btnNeutralTiny(T)}>Aç</a>
+                        <button type="button" onClick={() => actions.removeGalleryItem(data._id, i)} style={btnDeleteSm(T)}>Sil</button>
                       </div>
                     </div>
                   ))}
