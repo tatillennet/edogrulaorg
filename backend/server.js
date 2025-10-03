@@ -17,6 +17,8 @@ import os from "os";
 import cookieParser from "cookie-parser";
 import jwt from "jsonwebtoken";
 import nodemailer from "nodemailer";
+import cmsRouter from "./routes/cms.js";
+
 
 // Routes
 import authRoutes from "./routes/auth.js";
@@ -275,6 +277,7 @@ app.use("/api/uploads", express.static(UPLOADS_ROOT, staticOpts));
 
 /* ---------------- Knowledge (Google-like header) ---------------- */
 app.use("/api", knowledgeRoutes);
+app.use("/api/cms", cmsRouter);
 
 /* ---------------- Absolutize JSON media URLs ---------------- */
 const getBaseUrl = (req) =>
