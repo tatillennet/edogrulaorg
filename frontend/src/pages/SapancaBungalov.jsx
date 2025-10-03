@@ -1,8 +1,16 @@
-// frontend/src/pages/SapancaBungalov.jsx
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
-import { FaInstagram, FaPhone, FaGlobe, FaCheck, FaStar, FaBuilding } from "react-icons/fa6";
+import {
+  FaInstagram,
+  FaPhone,
+  FaGlobe,
+  FaCheck,
+  FaStar,
+  FaBuilding,
+  FaFilter,
+  FaChevronDown,
+} from "react-icons/fa6";
 
 /* ================== API ================== */
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
@@ -25,15 +33,18 @@ export default function SapancaBungalov() {
   // sponsorlar
   const [featured, setFeatured] = useState([]);
 
-  // filtre/sıralama
-  const [sort, setSort] = useState("rating");   // "rating" | "reviews"
+  // filtre/sıralama + arama (hero kalktığı için sadece client-side filtrede kullanılmıyor; istersen arama inputunu geri ekleyebiliriz)
+  const [sort, setSort] = useState("rating"); // "rating" | "reviews"
   const [onlyVerified, setOnlyVerified] = useState(false);
+  const [query] = useState(""); // hero kalktı; şimdilik boş
+
+  const [sortOpen, setSortOpen] = useState(false);
 
   // sayfalama
   const PER_PAGE = 20;
   const [page, setPage] = useState(1);
 
-  // görsel fallback
+  // görsel fallback (sadece sponsor kartlarında kullanılıyor)
   const DEFAULT_IMG = "/defaults/edogrula-default.webp.png";
 
   /* ---------- yardımcı: normalize ---------- */
@@ -57,9 +68,7 @@ export default function SapancaBungalov() {
     );
 
     const photo =
-      (Array.isArray(b?.gallery) && b.gallery[0]) ||
-      b?.photo ||
-      DEFAULT_IMG;
+      (Array.isArray(b?.gallery) && b.gallery[0]) || b?.photo || DEFAULT_IMG;
 
     return {
       id: b?._id,
@@ -86,11 +95,11 @@ export default function SapancaBungalov() {
     const { data } = await api.get("/api/businesses/filter", {
       params: {
         address: "Sapanca",
-        type: "bungalov",          // backend filtreleyebiliyorsa
+        type: "bungalov",
         page,
         perPage: PER_PAGE,
         onlyVerified,
-        sort,                      // "rating" | "reviews"
+        sort,
       },
     });
 
@@ -103,8 +112,6 @@ export default function SapancaBungalov() {
   /* ---------- Sponsorlar (admin yönetimli) ---------- */
   const fetchFeatured = useCallback(async () => {
     try {
-      // Beklenen endpoint sözleşmesi:
-      // GET /api/featured?place=Sapanca&type=bungalov&limit=8
       const { data } = await api.get("/api/featured", {
         params: { place: "Sapanca", type: "bungalov", limit: 8 },
       });
@@ -112,7 +119,6 @@ export default function SapancaBungalov() {
       const normalized = arr.map(normalize).filter(Boolean);
       setFeatured(normalized.slice(0, 8));
     } catch {
-      // endpoint yoksa sponsorları organikten türet (yalnızca 1. sayfada)
       setFeatured([]);
     }
   }, [normalize]);
@@ -151,10 +157,7 @@ export default function SapancaBungalov() {
     const start = (page - 1) * PER_PAGE;
     setItems(normalized.slice(start, start + PER_PAGE));
 
-    // sponsor fallback (sadece 1. sayfa)
-    if (page === 1 && featured.length === 0) {
-      setFeatured(normalized.slice(0, 4));
-    }
+    if (page === 1 && featured.length === 0) setFeatured(normalized.slice(0, 4));
   }, [page, onlyVerified, sort, normalize, featured.length]);
 
   /* ---------- Yükleyiciler ---------- */
@@ -183,34 +186,53 @@ export default function SapancaBungalov() {
   // 1. sayfada sponsor varsa organikten düş
   const organicItems = useMemo(() => {
     if (page !== 1 || featured.length === 0) return items;
-    // listeden featured ile çakışanları çıkar
     const featuredIds = new Set(featured.map((x) => x.id));
     return items.filter((x) => !featuredIds.has(x.id));
   }, [items, featured, page]);
+
+  // Arama (client-side filtre) — şu an query boş
+  const displayedItems = useMemo(() => organicItems, [organicItems]);
+
+  // dış tık ile sort menüsünü kapat
+  const sortMenuRef = useRef(null);
+  useEffect(() => {
+    function onDoc(e) {
+      if (!sortOpen) return;
+      if (sortMenuRef.current && !sortMenuRef.current.contains(e.target)) {
+        setSortOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [sortOpen]);
 
   return (
     <>
       <PageStyles />
       <div className="page-shell">
         <nav className="main-nav">
-          <button className="nav-button" onClick={() => navigate("/apply")}>
-            İşletmeni doğrula
-          </button>
-          <button className="nav-button" onClick={() => navigate("/report")}>
-            Şikayet et / Rapor et
-          </button>
+          <button className="nav-button" onClick={() => navigate("/apply")}>İşletmeni doğrula</button>
+          <button className="nav-button" onClick={() => navigate("/report")}>Şikayet et / Rapor et</button>
         </nav>
 
         <main className="content-container">
+
+          {/* ÜST: Hava durumu + bilgi (hero tamamen kaldırıldı) */}
+          <section className="top-knowledge">
+            <KnowledgeHeader query="Sapanca" http={api} showMedia />
+          </section>
+
           {loading ? (
             <SkeletonList />
-          ) : total === 0 && organicItems.length === 0 ? (
+          ) : total === 0 && displayedItems.length === 0 ? (
             <EmptyState />
           ) : (
             <>
               {page === 1 && featured.length > 0 && (
                 <section className="sponsored-section">
-                  <h2 className="section-title">Öne Çıkan Tesisler</h2>
+                  <div className="section-top">
+                    <h2 className="section-title">Öne Çıkan Tesisler</h2>
+                  </div>
                   <div className="horizontal-scroll">
                     {featured.map((it) => (
                       <SponsoredCard key={it.id} business={it} />
@@ -231,20 +253,45 @@ export default function SapancaBungalov() {
                       />
                       Sadece doğrulanmış
                     </label>
-                    <select
-                      value={sort}
-                      onChange={(e) => setSort(e.target.value)}
-                      className="filter-select"
-                    >
-                      <option value="rating">Puan (yüksek)</option>
-                      <option value="reviews">Yorum (çok)</option>
-                    </select>
+
+                    <div className="sort" ref={sortMenuRef}>
+                      <button className="sort-btn" onClick={() => setSortOpen((v) => !v)}>
+                        <FaFilter />
+                        <span className="ml-2">
+                          Sırala: <strong>{sort === "rating" ? "Puan (yüksek)" : "Yorum (çok)"}</strong>
+                        </span>
+                        <FaChevronDown className="ml-2" />
+                      </button>
+                      {sortOpen && (
+                        <div className="sort-menu">
+                          <button
+                            className={`sort-item ${sort === "rating" ? "active" : ""}`}
+                            onClick={() => {
+                              setSort("rating");
+                              setSortOpen(false);
+                            }}
+                          >
+                            Puan (yüksek)
+                          </button>
+                          <button
+                            className={`sort-item ${sort === "reviews" ? "active" : ""}`}
+                            onClick={() => {
+                              setSort("reviews");
+                              setSortOpen(false);
+                            }}
+                          >
+                            Yorum (çok)
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </header>
 
-                <div className="results-list">
-                  {organicItems.map((b) => (
-                    <ResultItem key={b.id} b={b} />
+                {/* ORGANİK SONUÇLAR: görselsiz satırlar + sağda Google puanı */}
+                <div className="results-grid">
+                  {displayedItems.map((b) => (
+                    <ResultRow key={b.id} b={b} />
                   ))}
                 </div>
 
@@ -254,6 +301,9 @@ export default function SapancaBungalov() {
               </section>
             </>
           )}
+
+          {/* EN ALTA: Planlama makaleleri */}
+          <IdeasSection />
         </main>
       </div>
     </>
@@ -266,9 +316,7 @@ function SponsoredCard({ business }) {
   return (
     <div
       className="sponsored-card"
-      onClick={() =>
-        business.slug && navigate(`/isletme/${encodeURIComponent(business.slug)}`)
-      }
+      onClick={() => business.slug && navigate(`/isletme/${encodeURIComponent(business.slug)}`)}
     >
       <div className="sponsored-image-wrapper">
         {business.photo ? (
@@ -288,44 +336,23 @@ function SponsoredCard({ business }) {
   );
 }
 
-function ResultItem({ b }) {
+/* --------- ORGANİK sonuç satırı: SAĞDA GOOGLE SKOR KARTI --------- */
+function ResultRow({ b }) {
   const navigate = useNavigate();
   const onOpen = () => b.slug && navigate(`/isletme/${encodeURIComponent(b.slug)}`);
 
   const hasEDogrula = b.rating > 0;
-  const hasGoogle = b.googleRating > 0;
+  const hasGoogle = b.googleRating > 0 || b.googleReviews > 0;
 
   return (
-    <article className="result-item">
-      <div>
-        <div className="item-header">
-          <div className="item-icon">
-            <FaBuilding />
-          </div>
-          <div className="item-header-text">
-            <span className="item-name-small">{b.name}</span>
-            <span className="item-handle">{b.instagramHandle ? `@${b.instagramHandle}` : ""}</span>
-          </div>
-        </div>
-
-        <a
-          href={`/isletme/${encodeURIComponent(b.slug)}`}
-          onClick={(e) => {
-            e.preventDefault();
-            onOpen();
-          }}
-          className="item-title-link"
-        >
-          {b.name}
-        </a>
-
-        <div className="item-meta">
+    <article className="result-row">
+      <div className="meta">
+        <div className="meta-top">
           {b.verified && (
             <span className="badge-verified">
               <FaCheck /> Doğrulandı
             </span>
           )}
-
           {hasEDogrula ? (
             <span className="badge-rating">
               <FaStar /> {b.rating.toFixed(1)}
@@ -335,24 +362,28 @@ function ResultItem({ b }) {
               <FaStar /> E-Doğrula değerlendirme yok
             </span>
           )}
-
-          {hasGoogle && (
-            <span className="badge-google">
-              Google <FaStar /> {b.googleRating.toFixed(1)}
-            </span>
-          )}
-
-          {!hasEDogrula && !hasGoogle && <span className="badge-muted">Puan yok</span>}
-
-          <span className="dot">•</span>
-          <span>{b.type || "Bungalov"}</span>
         </div>
 
-        <p className="item-summary">{b.summary}</p>
+        <a
+          href={`/isletme/${encodeURIComponent(b.slug)}`}
+          onClick={(e) => {
+            e.preventDefault();
+            onOpen();
+          }}
+          className="title"
+        >
+          {b.name}
+        </a>
 
-        <div className="item-links">
+        <div className="handle-type">
+          {b.instagramHandle ? `@${b.instagramHandle}` : ""} · {b.type || "Bungalov"} · {b.address}
+        </div>
+
+        <p className="summary">{b.summary}</p>
+
+        <div className="links">
           {b.phone && (
-            <a href={`tel:${b.phone}`} className="item-link-button">
+            <a href={`tel:${b.phone}`} className="link-btn">
               <FaPhone /> Telefon
             </a>
           )}
@@ -361,24 +392,78 @@ function ResultItem({ b }) {
               href={/^https?:\/\//i.test(b.website) ? b.website : `https://${b.website}`}
               target="_blank"
               rel="noreferrer noopener"
-              className="item-link-button"
+              className="link-btn"
             >
               <FaGlobe /> Web Sitesi
             </a>
           )}
           {b.instagramUrl && (
-            <a
-              href={b.instagramUrl}
-              target="_blank"
-              rel="noreferrer noopener"
-              className="item-link-button"
-            >
+            <a href={b.instagramUrl} target="_blank" rel="noreferrer noopener" className="link-btn">
               <FaInstagram /> Instagram
             </a>
           )}
         </div>
       </div>
+
+      {/* Sağ kart: Google puanı + yorum adedi */}
+      <div className="gscore-col">
+        <div className="gscore-card">
+          <div className="gscore-top">Google</div>
+          <div className="gscore-center">
+            <FaStar className="gscore-star" />
+            {hasGoogle ? (
+              <span className="gscore-value">
+                {b.googleRating > 0 ? b.googleRating.toFixed(1) : "—"}
+              </span>
+            ) : (
+              <span className="gscore-muted">puan yok</span>
+            )}
+          </div>
+          <div className="gscore-bottom">
+            {b.googleReviews > 0 ? `${b.googleReviews} yorum` : ""}
+          </div>
+        </div>
+      </div>
     </article>
+  );
+}
+
+/* ---------- EN ALTA: “Planlayın” bölümü ---------- */
+function IdeasSection() {
+  const cards = [
+    {
+      title: "Sapanca’da Jakuzili En İyi 5 Bungalov",
+      desc: "Huzurlu bir kaçamak için jakuzili en iyi bungalovları sizin için derledik…",
+      to: "/blog/jakuzili-bungalovlar",
+    },
+    {
+      title: "Sapanca Gölü Kenarında Mutlaka Görülmesi Gereken Yerler",
+      desc: "Göl çevresindeki doğal güzellikler ve aktiviteleri keşfedin…",
+      to: "/blog/gol-kenari-rotalar",
+    },
+    {
+      title: "Evcil Hayvan Dostu Sapanca Konaklama Rehberi",
+      desc: "Patili dostunuzla konforlu bir tatil yapabileceğiniz işletmeler…",
+      to: "/blog/evcil-dostu-isletmeler",
+    },
+  ];
+  return (
+    <section className="ideas bottom">
+      <h2 className="ideas-title">Sapanca Tatilinizi Planlayın</h2>
+      <div className="ideas-grid">
+        {cards.map((c, i) => (
+          <a key={i} className="ideas-card" href={c.to}>
+            <div className="ideas-media" />
+            <div className="ideas-overlay" />
+            <div className="ideas-body">
+              <h3 className="ideas-h3">{c.title}</h3>
+              <p className="ideas-p">{c.desc}</p>
+              <span className="ideas-link">Devamını Oku →</span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -404,11 +489,7 @@ function Pagination({ page, total, onChange }) {
             …
           </span>
         ) : (
-          <button
-            key={p}
-            className={`pager-num ${p === page ? "active" : ""}`}
-            onClick={() => onChange(p)}
-          >
+          <button key={p} className={`pager-num ${p === page ? "active" : ""}`} onClick={() => onChange(p)}>
             {p}
           </button>
         )
@@ -423,15 +504,120 @@ function Pagination({ page, total, onChange }) {
 /* ---------- Skeleton & Empty ---------- */
 function SkeletonList() {
   return (
-    <div className="results-list">
+    <div className="results-grid">
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="result-item skeleton" />
+        <div key={i} className="result-row skeleton" />
       ))}
     </div>
   );
 }
 function EmptyState() {
-  return <div className="result-item">Sonuç bulunamadı.</div>;
+  return <div className="result-row">Sonuç bulunamadı.</div>;
+}
+
+/* ---------- Google benzeri bilgi bloğu ---------- */
+function KnowledgeHeader({ query = "Sapanca", http, showMedia = false }) {
+  const [data, setData] = useState(null);
+  const apiClient = http || axios;
+
+  const strip = (s) => String(s || "").replace(/<[^>]*>/g, "");
+
+  const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const { data } = await apiClient.get(`/api/geo/knowledge`, { params: { q: query } });
+        if (alive) setData(data);
+      } catch {}
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [query]);
+
+  if (!data) return null;
+
+  const title = strip(data?.title || query);
+  const subtitle = strip(data?.subtitle || "");
+  const summary = strip(data?.summary || "");
+  const wikiUrl = data?.wiki_url || null;
+  const gmapUrl = data?.gmap_url || null;
+  const coords = data?.coordinates || null;
+  const now = data?.weather?.current_weather || null;
+  const daily = data?.weather?.daily || null;
+
+  let staticMap = null;
+  if (MAPS_KEY && coords?.lat != null && coords?.lng != null) {
+    const { lat, lng } = coords;
+    staticMap = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=12&scale=2&size=640x320&maptype=roadmap&markers=color:0x2563eb|${lat},${lng}&key=${MAPS_KEY}`;
+  }
+
+  const image = data?.image || data?.thumbnail || null;
+
+  return (
+    <section className={`kb ${showMedia ? "kb-has-media" : ""}`}>
+      {showMedia && (
+        <div className="kb-media">
+          {image ? <img src={image} alt={title} /> : <div className="kb-media-ph" />}
+        </div>
+      )}
+
+      {staticMap && (
+        <a className="kb-map" href={gmapUrl || "#"} target="_blank" rel="noreferrer">
+          <img src={staticMap} alt="Harita" />
+        </a>
+      )}
+
+      <div className="kb-info">
+        <h2 className="kb-title">{title}</h2>
+        {subtitle && <div className="kb-sub">{subtitle}</div>}
+        {summary && <p className="kb-text">{summary}</p>}
+        <div className="kb-links">
+          {wikiUrl && (
+            <a className="kb-link" href={wikiUrl} target="_blank" rel="noreferrer">
+              Wikipedia
+            </a>
+          )}
+          {gmapUrl && (
+            <a className="kb-link" href={gmapUrl} target="_blank" rel="noreferrer">
+              Haritada gör
+            </a>
+          )}
+        </div>
+      </div>
+
+      {now && (
+        <div className="kb-weather">
+          <div className="kb-weather-card">
+            <div className="kb-weather-label">Şu an hava</div>
+            <div className="kb-weather-temp">{Math.round(now.temperature)}°</div>
+            <div className="kb-weather-wind">rüzgâr {Math.round(now.windspeed)} km/s</div>
+          </div>
+          {daily?.temperature_2m_max && daily?.temperature_2m_min && (
+            <div className="kb-forecast">
+              {daily.time?.slice(0, 3).map((_, i) => (
+                <div key={i} className="kb-forecast-item">
+                  <div className="kb-forecast-day">
+                    {new Date(daily.time[i]).toLocaleDateString("tr-TR", { weekday: "short" })}
+                  </div>
+                  <div className="kb-forecast-temps">
+                    {Math.round(daily.temperature_2m_max[i])}° / {Math.round(daily.temperature_2m_min[i])}°
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {gmapUrl && (
+            <a className="kb-route" href={gmapUrl} target="_blank" rel="noreferrer">
+              Yol tarifi
+            </a>
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
 /* ================== Stiller ================== */
@@ -439,103 +625,135 @@ function PageStyles() {
   return (
     <style>{`
       :root{
-        --bg-color:#f8fafc; --card-bg:#fff; --text-color:#0f172a; --text-muted:#64748b;
-        --border-color:#e2e8f0; --brand-blue:#2563eb; --verified-green:#16a34a; --star-yellow:#f59e0b;
+        --bg:#f8fafc; --card:#fff; --fg:#0f172a; --muted:#64748b;
+        --border:#e2e8f0; --brand:#2563eb; --green:#16a34a; --yellow:#f59e0b; --ink:#1f2937;
       }
-
-      /* Sol hizalı "pro" iskelet */
-      .page-shell{ background:var(--bg-color); color:var(--text-color); min-height:100vh; }
+      .page-shell{ background:var(--bg); color:var(--fg); min-height:100vh; }
       .main-nav{ position:sticky; top:0; z-index:10; background:rgba(248,250,252,.85);
-        backdrop-filter:blur(8px); padding:12px 24px; border-bottom:1px solid var(--border-color);
+        backdrop-filter:blur(8px); padding:12px 24px; border-bottom:1px solid var(--border);
         display:flex; justify-content:flex-end; gap:12px; }
-      .nav-button{ background:var(--card-bg); border:1px solid var(--border-color); padding:8px 16px;
+      .nav-button{ background:var(--card); border:1px solid var(--border); padding:8px 16px;
         border-radius:999px; font-weight:700; cursor:pointer; }
       .nav-button:hover{ background:#f1f5f9; border-color:#cbd5e1; }
 
-      /* SOLA HİZA: solda sabit boşluk, sağda esneme */
-      .content-container{
-        max-width: 1200px;
-        margin-left: clamp(14px, 3.2vw, 32px);
-        margin-right: auto;
-        padding: 28px 0 120px;
-      }
+      .content-container{ max-width:1200px; margin-left:clamp(14px, 3.2vw, 32px); margin-right:auto; padding:28px 0 96px; }
 
-      .section-title{ font-size:28px; font-weight:800; color:#1e293b; margin:0 0 18px; }
+      /* ----------- Ideas (Planlayın) ----------- */
+      .ideas{ margin:26px 0 6px; }
+      .ideas.bottom{ margin-top:36px; }
+      .ideas-title{ font-size:20px; font-weight:800; color:#1e293b; margin:6px 0 12px; }
+      .ideas-grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; }
+      .ideas-card{ position:relative; display:block; border-radius:16px; overflow:hidden; text-decoration:none; color:inherit;
+        border:1px solid var(--border); background:#f8fbff; transition:transform .20s, box-shadow .20s; }
+      .ideas-card:hover{ transform:translateY(-4px); box-shadow:0 16px 32px rgba(0,0,0,.08); }
+      .ideas-media{ height:160px; background:linear-gradient(135deg,#e2ecff,#f3f7ff); }
+      .ideas-overlay{ position:absolute; inset:0; background:linear-gradient(180deg,transparent 40%, rgba(0,0,0,.55) 100%); pointer-events:none; }
+      .ideas-body{ position:absolute; left:0; right:0; bottom:0; padding:12px; color:#fff; }
+      .ideas-h3{ margin:0 0 6px; font-size:16px; font-weight:900; text-shadow:0 1px 2px rgba(0,0,0,.35); }
+      .ideas-p{ margin:0 0 10px; font-size:13px; opacity:.95; }
+      .ideas-link{ font-weight:800; }
+
+      /* Bölüm başlıkları */
+      .section-top{ display:flex; align-items:center; justify-content:space-between; }
+      .section-title{ font-size:22px; font-weight:800; color:#1e293b; margin:12px 0; }
 
       /* Sponsorlar */
-      .sponsored-section{ margin-bottom:36px; }
-      .horizontal-scroll{ display:flex; gap:18px; overflow-x:auto; padding: 4px 0 16px;
-        -webkit-overflow-scrolling:touch; }
+      .sponsored-section{ margin:6px 0 24px; }
+      .horizontal-scroll{ display:flex; gap:18px; overflow-x:auto; padding: 4px 0 16px; -webkit-overflow-scrolling:touch; }
       .horizontal-scroll::-webkit-scrollbar{ display:none; } .horizontal-scroll{ scrollbar-width:none; }
-
-      .sponsored-card{ flex:0 0 260px; background:var(--card-bg); border-radius:16px;
-        border:1px solid var(--border-color); overflow:hidden; cursor:pointer;
-        transition: transform .2s, box-shadow .2s; }
+      .sponsored-card{ flex:0 0 320px; background:var(--card); border-radius:16px; border:1px solid var(--border); overflow:hidden; cursor:pointer; transition: transform .2s, box-shadow .2s; }
       .sponsored-card:hover{ transform:translateY(-4px); box-shadow:0 14px 28px rgba(0,0,0,.08); }
-      .sponsored-image-wrapper{ height:150px; position:relative; background:#eef2f7; }
+      .sponsored-image-wrapper{ height:180px; position:relative; background:#eef2f7; }
       .sponsored-image{ width:100%; height:100%; object-fit:cover; }
-      .sponsored-image-fallback{ width:100%; height:100%; display:grid; place-items:center;
-        font-size:34px; color:var(--text-muted); }
-      .sponsored-tag{ position:absolute; top:10px; left:10px; background:rgba(0,0,0,.6); color:#fff;
-        padding:4px 8px; border-radius:6px; font-size:11px; font-weight:800; letter-spacing:.2px; }
+      .sponsored-image-fallback{ width:100%; height:100%; display:grid; place-items:center; font-size:34px; color:var(--muted); }
+      .sponsored-tag{ position:absolute; top:10px; left:10px; background:rgba(0,0,0,.6); color:#fff; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:800; letter-spacing:.2px; }
       .sponsored-card-content{ padding:12px; }
       .sponsored-title{ font-size:17px; font-weight:800; margin:0 0 4px; }
-      .sponsored-location{ font-size:14px; color:var(--text-muted); margin:0; }
+      .sponsored-location{ font-size:14px; color:var(--muted); margin:0; }
 
       /* Filtre barı */
-      .results-header{ display:flex; align-items:center; justify-content:space-between; gap:12px;
-        padding:12px 16px; border-radius:14px; border:1px solid var(--border-color);
-        background:var(--card-bg); margin-bottom:18px; }
-      .filters{ display:flex; align-items:center; gap:16px; }
+      .results-header{ display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-radius:14px; border:1px solid var(--border); background:var(--card); margin-bottom:18px; }
+      .filters{ display:flex; align-items:center; gap:16px; position:relative; }
       .filter-checkbox{ display:inline-flex; gap:8px; align-items:center; cursor:pointer; font-size:14px; }
-      .filter-select{ background:none; border:none; font-size:14px; font-weight:700; cursor:pointer; }
+      .sort{ position:relative; }
+      .sort-btn{ display:inline-flex; align-items:center; gap:8px; background:#fff; border:1px solid var(--border); padding:8px 12px; border-radius:12px; font-weight:700; }
+      .sort-menu{ position:absolute; right:0; top:42px; z-index:20; width:220px; background:#fff; border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.08); overflow:hidden; }
+      .sort-item{ display:block; width:100%; text-align:left; padding:10px 12px; background:#fff; border:0; font-size:14px; }
+      .sort-item:hover{ background:#f8fafc; }
+      .sort-item.active{ background:#eef2f7; font-weight:800; }
 
-      /* Sonuç listesi */
-      .results-list{ display:grid; gap:18px; }
-      .result-item{ background:var(--card-bg); padding:18px; border-radius:14px;
-        border:1px solid var(--border-color); transition: box-shadow .2s; }
-      .result-item:hover{ box-shadow:0 10px 24px rgba(0,0,0,.06); }
-      .result-item.skeleton{ height:120px; background:linear-gradient(90deg,#f3f4f6,#eef2f7,#f3f4f6);
-        background-size:200% 100%; animation:shimmer 1.2s infinite; }
+      /* Sonuçlar — görselsiz satır kartları */
+      .results-grid{ display:grid; gap:16px; }
+      .result-row{ display:grid; grid-template-columns: 1fr 160px; gap:16px; background:var(--card); padding:14px; border-radius:16px; border:1px solid var(--border); transition: box-shadow .2s; }
+      .result-row:hover{ box-shadow:0 10px 24px rgba(0,0,0,.06); }
+      .result-row.skeleton{ height:128px; background:linear-gradient(90deg,#f3f4f6,#eef2f7,#f3f4f6); background-size:200% 100%; animation:shimmer 1.2s infinite; }
       @keyframes shimmer{ 0%{background-position:0 0} 100%{background-position:-200% 0} }
 
-      .item-header{ display:flex; align-items:center; gap:8px; margin-bottom:2px; }
-      .item-icon{ width:28px; height:28px; border-radius:50%; background:#eef2f7; display:grid;
-        place-items:center; color:var(--text-muted); }
-      .item-header-text{ display:flex; flex-direction:column; }
-      .item-name-small{ font-size:15px; font-weight:700; }
-      .item-handle{ font-size:13px; color:var(--text-muted); }
-      .item-title-link{ font-size:22px; font-weight:800; color:var(--brand-blue); text-decoration:none;
-        display:block; margin:4px 0 8px; }
-      .item-title-link:hover{ text-decoration:underline; }
+      .meta-top{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
+      .badge-verified{ display:inline-flex; gap:6px; align-items:center; color:var(--green); font-weight:900; }
+      .badge-rating{ display:inline-flex; gap:6px; align-items:center; color:var(--yellow); font-weight:900; }
+      .badge-muted{ display:inline-flex; gap:6px; align-items:center; color:var(--muted); }
 
-      .item-summary{ font-size:15px; color:#334155; line-height:1.6; margin:8px 0 14px; }
-      .item-meta{ display:flex; gap:12px; align-items:center; font-size:14px; flex-wrap:wrap; }
-      .badge-verified{ display:inline-flex; gap:6px; align-items:center; color:var(--verified-green);
-        font-weight:900; }
-      .badge-rating{ display:inline-flex; gap:6px; align-items:center; color:var(--star-yellow);
-        font-weight:900; }
-      .badge-google{ display:inline-flex; gap:6px; align-items:center; background:#f1f5f9;
-        border:1px solid var(--border-color); padding:2px 8px; border-radius:999px; font-weight:800; }
-      .badge-muted{ display:inline-flex; gap:6px; align-items:center; color:var(--text-muted); }
-      .dot{ color:var(--text-muted); }
+      .title{ font-size:18px; font-weight:800; color:var(--brand); text-decoration:none; display:block; margin:0 0 4px; }
+      .title:hover{ text-decoration:underline; }
+      .handle-type{ font-size:13px; color:var(--muted); }
+      .summary{ font-size:14px; color:#334155; line-height:1.55; margin:8px 0 10px; }
 
-      .item-links{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px;
-        border-top:1px solid var(--border-color); padding-top:14px; }
-      .item-link-button{ display:inline-flex; gap:8px; align-items:center; background:#f1f5f9;
-        border:1px solid transparent; padding:6px 12px; border-radius:8px; font-size:14px;
-        font-weight:700; color:var(--text-muted); text-decoration:none; transition:.2s; }
-      .item-link-button:hover{ background:#e2e8f0; color:var(--text-color); }
+      .links{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+      .link-btn{ display:inline-flex; gap:8px; align-items:center; background:#f1f5f9; border:1px solid transparent; padding:6px 12px; border-radius:8px; font-size:14px; font-weight:700; color:var(--muted); text-decoration:none; transition:.2s; }
+      .link-btn:hover{ background:#e2e8f0; color:var(--fg); }
+
+      /* Google Score Kartı */
+      .gscore-col{ display:flex; align-items:center; justify-content:flex-end; }
+      .gscore-card{ width:160px; border:1px solid var(--border); border-radius:14px; padding:10px; text-align:center; }
+      .gscore-top{ font-size:12px; color:var(--muted); margin-bottom:6px; }
+      .gscore-center{ display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:4px; }
+      .gscore-star{ color:#f59e0b; }
+      .gscore-value{ font-weight:900; font-size:18px; }
+      .gscore-muted{ color:var(--muted); font-weight:700; }
+      .gscore-bottom{ font-size:12px; color:var(--muted); }
+
+      /* Üst bilgi bloğu */
+      .top-knowledge{ margin-bottom:18px; }
+      .kb{ display:grid; grid-template-columns: 2fr 2fr 1.2fr; gap:16px; align-items:stretch; border:1px solid var(--border); background:var(--card); border-radius:16px; padding:16px; }
+      .kb-has-media{ grid-template-columns: 1.5fr 1.5fr 1.2fr; }
+      .kb-media{ border:1px solid var(--border); border-radius:14px; overflow:hidden; background:linear-gradient(180deg,#f3f6ff,#fff); min-height:180px; }
+      .kb-media img{ width:100%; height:100%; object-fit:cover; display:block; }
+      .kb-media-ph{ width:100%; height:100%; min-height:180px; background:repeating-linear-gradient(45deg,#eef2ff,#eef2ff 10px,#f8fafc 10px,#f8fafc 20px); }
+      .kb-map{ border:1px solid var(--border); border-radius:14px; overflow:hidden; display:block; background:#eef2f7; }
+      .kb-map img{ width:100%; height:100%; object-fit:cover; display:block; }
+      .kb-info{ border:1px solid var(--border); border-radius:14px; padding:12px; }
+      .kb-title{ font-size:22px; font-weight:800; color:#1e293b; margin:0; }
+      .kb-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+      .kb-text{ margin-top:10px; color:#334155; line-height:1.55; }
+      .kb-links{ display:flex; gap:14px; margin-top:10px; }
+      .kb-link{ color:#2563eb; text-decoration:none; font-weight:700; }
+      .kb-link:hover{ text-decoration:underline; }
+      .kb-weather{ display:flex; flex-direction:column; gap:12px; }
+      .kb-weather-card{ text-align:center; border:1px solid var(--border); border-radius:14px; padding:10px; }
+      .kb-weather-label{ font-size:12px; color:var(--muted); }
+      .kb-weather-temp{ font-size:32px; font-weight:900; }
+      .kb-weather-wind{ font-size:12px; color:var(--muted); }
+      .kb-forecast{ display:grid; grid-template-columns: repeat(3,1fr); gap:8px; }
+      .kb-forecast-item{ border:1px solid var(--border); border-radius:10px; padding:8px; text-align:center; font-weight:700; }
+      .kb-forecast-day{ font-size:12px; color:var(--muted); }
+      .kb-forecast-temps{ font-size:14px; }
+      .kb-route{ display:block; text-align:center; font-weight:800; border:1px solid var(--border); border-radius:10px; padding:10px; text-decoration:none; color:var(--fg); background:#fff; }
 
       /* Pager */
       .pager{ margin:22px 0 0; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
-      .pager-btn{ padding:8px 12px; border-radius:8px; border:1px solid var(--border-color);
-        background:#fff; cursor:pointer; }
+      .pager-btn{ padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:#fff; cursor:pointer; }
       .pager-btn[disabled]{ opacity:.6; cursor:not-allowed; }
-      .pager-num{ width:40px; height:40px; border-radius:999px; border:1px solid var(--border-color);
-        background:#fff; cursor:pointer; }
-      .pager-num.active{ background:#1f2937; color:#fff; border-color:#1f2937; }
-      .pager-gap{ padding:0 4px; color:var(--text-muted); }
+      .pager-num{ width:40px; height:40px; border-radius:999px; border:1px solid var(--border); background:#fff; cursor:pointer; }
+      .pager-num.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
+      .pager-gap{ padding:0 4px; color:var(--muted); }
+
+      @media (max-width: 980px){
+        .ideas-grid{ grid-template-columns: 1fr; }
+        .kb, .kb-has-media{ grid-template-columns: 1fr; }
+        .result-row{ grid-template-columns: 1fr; }
+        .gscore-col{ justify-content:flex-start; }
+      }
     `}</style>
   );
 }
