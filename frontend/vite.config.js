@@ -5,8 +5,8 @@ import { fileURLToPath, URL } from "node:url";
 
 /**
  * Hedef normalizasyonu
- * - ":5000"             → "http://localhost:5000"
- * - "localhost:5000"    → "http://localhost:5000"
+ * - ":5000"             → "https://localhost:5000"
+ * - "localhost:5000"    → "https://localhost:5000"
  * - "https://api.foo"   → "https://api.foo"
  * - "" (boş)            → "http://localhost:5000"
  * - ".../api" ile bitiyorsa → sonundaki "/api" kaldır (proxy'de çift /api olmasın)
@@ -14,10 +14,10 @@ import { fileURLToPath, URL } from "node:url";
 function normalizeTarget(raw) {
   const RAW = String(raw || "").trim();
   let t;
-  if (!RAW) t = "http://localhost:5000";
+  if (!RAW) t = "https://localhost:5000";
   else if (/^https?:\/\//i.test(RAW)) t = RAW;
-  else if (/^:\d+$/.test(RAW)) t = `http://localhost:${RAW.slice(1)}`;
-  else t = `http://${RAW}`;
+  else if (/^:\d+$/.test(RAW)) t = `https://localhost:${RAW.slice(1)}`;
+  else t = `https://${RAW}`;
 
   t = t.replace(/\/+$/, "");    // sondaki slashları at
   t = t.replace(/\/api$/i, ""); // sonda /api varsa kaldır

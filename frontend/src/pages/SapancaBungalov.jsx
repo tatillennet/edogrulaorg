@@ -1,5 +1,17 @@
 // src/pages/SapancaBungalov.jsx
-import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
+// Güncel tam sürüm.
+// - /api/businesses/filter veya fallback ile Sapanca bungalovlarını çeker
+// - Google puanı alanını BusinessProfile.jsx mantığına yakın şekilde hydrate eder
+// - Google verisi için backend endpointlerini kullanır (placeId varsa /api/google/reviews, yoksa /api/google/reviews/search)
+// - Sonuçlar için sessionStorage cache kullanır; gereksiz tekrar istek atmaz
+
+import React, {
+  useEffect,
+  useMemo,
+  useState,
+  useCallback,
+  useRef,
+} from "react";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
 import { Helmet } from "react-helmet-async";
@@ -15,6 +27,7 @@ import {
 } from "react-icons/fa6";
 
 /* ================== API ================== */
+
 const API_BASE = (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, "");
 const api = axios.create({
   baseURL: API_BASE || undefined,
@@ -23,7 +36,82 @@ const api = axios.create({
   headers: { Accept: "application/json" },
 });
 
-/* ================== Sayfa ================== */
+/* ================== HELPERS ================== */
+
+const toPositiveNumber = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+const pickFirstNumber = (...candidates) => {
+  for (const c of candidates) {
+    const n = toPositiveNumber(c);
+    if (n) return n;
+  }
+  return 0;
+};
+
+/* -------- Google score normalizasyonu (BusinessProfile ile uyumlu) -------- */
+
+function extractGoogleScore(data) {
+  if (!data) return null;
+
+  const place = data.place || data.result || {};
+
+  const ratingRaw =
+    place.rating ?? data.rating ?? data.averageRating ?? null;
+  const rating = Number(ratingRaw);
+  const saneRating =
+    Number.isFinite(rating) && rating > 0 && rating <= 5 ? rating : null;
+
+  let count =
+    Number(
+      place.count ??
+        place.userRatingCount ??
+        place.user_ratings_total ??
+        data.count ??
+        data.userRatingsTotal
+    ) || 0;
+
+  if (!count && Array.isArray(data.reviews || place.reviews)) {
+    count = (data.reviews || place.reviews).length;
+  }
+
+  if (!Number.isFinite(count) || count < 0) count = 0;
+
+  if (!saneRating && !count) return null;
+
+  return {
+    rating: saneRating || null,
+    count,
+  };
+}
+
+/* -------- Basit sessionStorage cache (aynı oturumda tekrar istek atma) -------- */
+
+const GCACHE_KEY = "sapanca_gscore_cache_v1";
+
+function loadGCache() {
+  try {
+    const raw = sessionStorage.getItem(GCACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveGCache(obj) {
+  try {
+    sessionStorage.setItem(GCACHE_KEY, JSON.stringify(obj));
+  } catch {
+    // sessiz
+  }
+}
+
+/* ================== PAGE ================== */
+
 export default function SapancaBungalov() {
   const navigate = useNavigate();
 
@@ -44,53 +132,165 @@ export default function SapancaBungalov() {
   const PER_PAGE = 20;
   const [page, setPage] = useState(1);
 
-  // görsel fallback (sadece sponsor kartlarında)
+  // görsel fallback
   const DEFAULT_IMG = "/defaults/edogrula-default.webp.png";
 
-  /* ---------- yardımcı: normalize ---------- */
-  const normalize = useCallback((b) => {
-    const descRaw =
-      (b?.summary && String(b.summary).trim()) ||
-      (b?.description && String(b.description).trim()) ||
-      "";
-    const summary =
-      descRaw.length > 0
-        ? descRaw.length > 180
-          ? `${descRaw.slice(0, 180)}…`
-          : descRaw
-        : "Açıklama mevcut değil.";
+  // Google cache state
+  const [gCache, setGCache] = useState(() => loadGCache());
 
-    const rating = Number(b?.rating ?? 0);
-    const reviews = Number(b?.reviewsCount ?? 0);
-    const googleRating = Number(b?.googleRating ?? b?.google_rate ?? b?.google?.rating ?? 0);
-    const googleReviews = Number(
-      b?.googleReviewsCount ?? b?.google_reviews ?? b?.google?.reviewsCount ?? 0
-    );
-
-    const photo =
-      (Array.isArray(b?.gallery) && b.gallery[0]) || b?.photo || DEFAULT_IMG;
-
-    return {
-      id: b?._id,
-      slug: b?.slug || b?._id,
-      name: b?.name || "İsimsiz İşletme",
-      verified: !!b?.verified,
-      address: b?.address || "Sapanca",
-      phone: b?.phone || "",
-      website: b?.website || "",
-      instagramHandle: b?.handle || b?.instagramUsername || "",
-      instagramUrl: b?.instagramUrl || "",
-      type: b?.type || "Bungalov",
-      photo,
-      summary,
-      rating,
-      reviews,
-      googleRating,
-      googleReviews,
-    };
+  const updateGCache = useCallback((key, value) => {
+    setGCache((prev) => {
+      const next = { ...prev, [key]: value };
+      saveGCache(next);
+      return next;
+    });
   }, []);
 
+  /* ---------- normalize ---------- */
+
+  const normalize = useCallback(
+    (b) => {
+      if (!b) return null;
+
+      const descRaw =
+        (b.summary && String(b.summary).trim()) ||
+        (b.description && String(b.description).trim()) ||
+        "";
+      const summary =
+        descRaw.length > 0
+          ? descRaw.length > 180
+            ? `${descRaw.slice(0, 180)}…`
+            : descRaw
+          : "Açıklama mevcut değil.";
+
+      // E-Doğrula puanı
+      const rating = toPositiveNumber(
+        b.rating ?? b.rate ?? b.score ?? b.avgRating
+      );
+      const reviews = toPositiveNumber(
+        b.reviewsCount ??
+          b.reviewCount ??
+          b.reviews ??
+          b.votes ??
+          b.ratingCount
+      );
+
+      // Google puanı & yorum sayısı (DB'de varsa direkt kullan)
+      let googleRating = pickFirstNumber(
+        b.googleRating,
+        b.google_rating,
+        b.googleRate,
+        b.google_rate,
+        b.google_score,
+        b.googleScore,
+        b.google?.rating,
+        b.google?.ratingValue,
+        b.google?.rating_value
+      );
+
+      let googleReviews = pickFirstNumber(
+        b.googleReviewsCount,
+        b.googleReviewCount,
+        b.google_reviews,
+        b.google_review_count,
+        b.google_review_total,
+        b.googleReviews,
+        b.google?.user_ratings_total,
+        b.google?.reviewsCount,
+        b.google?.reviews,
+        b.google?.total_reviews,
+        b.google?.reviewCount
+      );
+
+      // Heuristik: google objesinde sayı ara
+      if (!googleRating && b.google && typeof b.google === "object") {
+        const nums = Object.values(b.google)
+          .map((v) => Number(v))
+          .filter((n) => Number.isFinite(n) && n > 0);
+        const ratingCandidates = nums.filter((n) => n <= 5.0);
+        if (ratingCandidates.length) {
+          googleRating = ratingCandidates[0];
+        }
+      }
+
+      if (!googleReviews && b.google && typeof b.google === "object") {
+        const nums = Object.values(b.google)
+          .map((v) => Number(v))
+          .filter((n) => Number.isFinite(n) && n > 0);
+        const reviewCandidates = nums.filter(
+          (n) => n > 5 && (!googleRating || n >= googleRating)
+        );
+        if (reviewCandidates.length) {
+          googleReviews = reviewCandidates[0];
+        }
+      }
+
+      const rawHandle =
+        b.handle ||
+        b.instagramUsername ||
+        b.instagram_handle ||
+        b.instagram ||
+        "";
+      const instagramHandle = String(rawHandle || "").replace(/^@+/, "");
+      const instagramUrl =
+        b.instagramUrl ||
+        (instagramHandle
+          ? `https://www.instagram.com/${instagramHandle}`
+          : "");
+
+      const websiteRaw = b.website || b.site || "";
+      const website =
+        websiteRaw && /^https?:\/\//i.test(websiteRaw)
+          ? websiteRaw
+          : websiteRaw
+          ? `https://${websiteRaw}`
+          : "";
+
+      const photo =
+        (Array.isArray(b.gallery) && b.gallery[0]) ||
+        b.photo ||
+        b.cover ||
+        DEFAULT_IMG;
+
+      const googlePlaceId =
+        b.googlePlaceId ||
+        b.google_place_id ||
+        b.google?.place_id ||
+        null;
+
+      // cache'te varsa uygula
+      const cacheKey = googlePlaceId || b.slug || b._id;
+      if (cacheKey && gCache[cacheKey]) {
+        const cached = gCache[cacheKey];
+        if (cached?.rating) googleRating = cached.rating;
+        if (cached?.count) googleReviews = cached.count;
+      }
+
+      return {
+        id: b._id,
+        slug: b.slug || b._id,
+        name: b.name || "İsimsiz İşletme",
+        verified: !!b.verified,
+        address: b.address || "Sapanca",
+        phone: b.phone || "",
+        website,
+        instagramHandle,
+        instagramUrl,
+        type: b.type || "Bungalov",
+        photo,
+        summary,
+        rating,
+        reviews,
+        googleRating,
+        googleReviews,
+        googlePlaceId,
+      };
+    },
+    [DEFAULT_IMG, gCache]
+  );
+
   /* ---------- Sunucudan sayfalı çekme ---------- */
+
   const fetchServerPaged = useCallback(async () => {
     const { data } = await api.get("/api/businesses/filter", {
       params: {
@@ -103,19 +303,29 @@ export default function SapancaBungalov() {
       },
     });
 
-    const raw = data?.items || [];
-    const normalized = raw.map(normalize);
+    const raw = Array.isArray(data?.items) ? data.items : [];
+    const normalized = raw.map(normalize).filter(Boolean);
+
     setItems(normalized);
-    setTotal(Number(data?.total ?? normalized.length));
+    setTotal(
+      Number.isFinite(Number(data?.total))
+        ? Number(data.total)
+        : normalized.length
+    );
   }, [page, onlyVerified, sort, normalize]);
 
-  /* ---------- Sponsorlar (admin yönetimli) ---------- */
+  /* ---------- Sponsorlar ---------- */
+
   const fetchFeatured = useCallback(async () => {
     try {
       const { data } = await api.get("/api/featured", {
         params: { place: "Sapanca", type: "bungalov", limit: 8 },
       });
-      const arr = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
+      const arr = Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data)
+        ? data
+        : [];
       const normalized = arr.map(normalize).filter(Boolean);
       setFeatured(normalized.slice(0, 8));
     } catch {
@@ -123,44 +333,62 @@ export default function SapancaBungalov() {
     }
   }, [normalize]);
 
-  /* ---------- Fallback: geniş arama + client filtre ---------- */
+  /* ---------- Fallback ---------- */
+
   const fetchFallback = useCallback(async () => {
     const queries = ["sapanca", "sapanca bungalov", "sapanca bungalow"];
+
     const buckets = await Promise.all(
       queries.map((q) =>
         api
-          .get("/api/businesses/search", { params: { q, type: "text", limit: 500 } })
-          .then((r) => r.data?.businesses || [])
+          .get("/api/businesses/search", {
+            params: { q, type: "text", limit: 500 },
+          })
+          .then((r) =>
+            Array.isArray(r.data?.businesses) ? r.data.businesses : []
+          )
           .catch(() => [])
       )
     );
+
     const map = new Map();
-    for (const b of [].concat(...buckets)) if (b?._id) map.set(b._id, b);
+    for (const b of buckets.flat()) {
+      if (b?._id && !map.has(b._id)) map.set(b._id, b);
+    }
+
     const raw = Array.from(map.values());
 
     const filtered = raw.filter((b) => {
-      const addr = (b?.address || "").toString();
+      const addr = (b.address || "").toString();
       const inSapanca = /sapanca/i.test(addr) || /^sapanca$/i.test(addr);
-      const t = (b?.type || "").toString().toLowerCase();
+      const t = (b.type || "").toString().toLowerCase();
       const isBungalow = /bungalov|bungalow/.test(t);
-      return inSapanca && isBungalow && (!onlyVerified || b?.verified);
+      return inSapanca && isBungalow && (!onlyVerified || b.verified);
     });
 
-    const normalized = filtered.map(normalize);
+    const normalized = filtered.map(normalize).filter(Boolean);
 
-    const score = (x) => (x.rating > 0 ? x.rating : x.googleRating || 0);
-    const rev = (x) => (x.reviews > 0 ? x.reviews : x.googleReviews || 0);
-    normalized.sort((a, b) => (sort === "reviews" ? rev(b) - rev(a) : score(b) - score(a)));
+    const score = (x) =>
+      x.rating > 0 ? x.rating : x.googleRating > 0 ? x.googleRating : 0;
+    const rev = (x) =>
+      x.reviews > 0 ? x.reviews : x.googleReviews > 0 ? x.googleReviews : 0;
+
+    normalized.sort((a, b) =>
+      sort === "reviews" ? rev(b) - rev(a) : score(b) - score(a)
+    );
 
     setTotal(normalized.length);
 
     const start = (page - 1) * PER_PAGE;
     setItems(normalized.slice(start, start + PER_PAGE));
 
-    if (page === 1 && featured.length === 0) setFeatured(normalized.slice(0, 4));
+    if (page === 1 && featured.length === 0) {
+      setFeatured(normalized.slice(0, 4));
+    }
   }, [page, onlyVerified, sort, normalize, featured.length]);
 
-  /* ---------- Yükleyiciler ---------- */
+  /* ---------- Veri yükleyici ---------- */
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
@@ -174,54 +402,149 @@ export default function SapancaBungalov() {
 
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, sort, onlyVerified]);
 
-  // filtre/sıralama değişince ilk sayfaya dön
+  // filtre değişince ilk sayfa
   useEffect(() => {
     setPage(1);
   }, [sort, onlyVerified]);
 
   const totalPages = Math.max(1, Math.ceil(total / PER_PAGE));
 
-  // 1. sayfada sponsor varsa organikten düş
+  // 1. sayfada sponsorları organikten çıkar
   const organicItems = useMemo(() => {
     if (page !== 1 || featured.length === 0) return items;
     const featuredIds = new Set(featured.map((x) => x.id));
     return items.filter((x) => !featuredIds.has(x.id));
   }, [items, featured, page]);
 
-  const displayedItems = useMemo(() => organicItems, [organicItems]);
+  const displayedItems = organicItems;
 
-  // dış tık ile sort menüsünü kapat
+  // sort menüsü dış tık
   const sortMenuRef = useRef(null);
   useEffect(() => {
-    function onDoc(e) {
+    const onDoc = (e) => {
       if (!sortOpen) return;
-      if (sortMenuRef.current && !sortMenuRef.current.contains(e.target)) {
+      if (
+        sortMenuRef.current &&
+        !sortMenuRef.current.contains(e.target)
+      ) {
         setSortOpen(false);
       }
-    }
+    };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
   }, [sortOpen]);
 
-  /* ---------- JSON-LD (ItemList + LodgingBusiness) ---------- */
+  /* ---------- GOOGLE PUANLARINI BACKEND'DEN HYDRATE ET ---------- */
+
+  useEffect(() => {
+    if (!items.length) return;
+
+    let cancelled = false;
+
+    const need = items.filter((b) => {
+      // zaten verisi varsa geç
+      if (b.googleRating > 0 || b.googleReviews > 0) return false;
+      const key = b.googlePlaceId || b.slug || b.id;
+      if (!key) return false;
+      const cached = gCache[key];
+      return !cached || (!cached.rating && !cached.count);
+    });
+
+    if (!need.length) return;
+
+    const CONCURRENCY = 3;
+    let index = 0;
+
+    const nextBatch = async () => {
+      if (cancelled || index >= need.length) return;
+      const slice = need.slice(index, index + CONCURRENCY);
+      index += CONCURRENCY;
+
+      await Promise.all(
+        slice.map(async (biz) => {
+          const key = biz.googlePlaceId || biz.slug || biz.id;
+          if (!key) return;
+          try {
+            let res;
+            if (biz.googlePlaceId) {
+              res = await api.get("/api/google/reviews", {
+                params: { placeId: biz.googlePlaceId, limit: 40 },
+              });
+            } else {
+              const q = `${biz.name} ${biz.address || "Sapanca"}`.trim();
+              res = await api.get("/api/google/reviews/search", {
+                params: { query: q, limit: 40 },
+              });
+            }
+
+            const score = extractGoogleScore(res.data);
+
+            updateGCache(key, score || { rating: null, count: 0 });
+
+            if (!score || cancelled) return;
+
+            setItems((prev) =>
+              prev.map((it) =>
+                it.id === biz.id || it.slug === biz.slug
+                  ? {
+                      ...it,
+                      googleRating: score.rating || it.googleRating || 0,
+                      googleReviews: score.count || it.googleReviews || 0,
+                    }
+                  : it
+              )
+            );
+          } catch {
+            updateGCache(key, { rating: null, count: 0 });
+          }
+        })
+      );
+
+      if (!cancelled && index < need.length) {
+        await nextBatch();
+      }
+    };
+
+    nextBatch();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
+
+  /* ---------- JSON-LD (ItemList) ---------- */
+
   const jsonLdItemList = useMemo(() => {
     try {
       const origin =
         typeof window !== "undefined"
           ? `${window.location.origin}`
           : "https://www.edogrula.org";
+
       const list = {
         "@context": "https://schema.org",
         "@type": "ItemList",
         name: "Sapanca Bungalov Evleri",
         itemListElement: displayedItems.slice(0, 20).map((b, i) => {
           const url = `${origin}/isletme/${encodeURIComponent(b.slug)}`;
+
           const ratingValue =
-            b.rating > 0 ? b.rating : b.googleRating > 0 ? b.googleRating : undefined;
+            b.rating > 0
+              ? b.rating
+              : b.googleRating > 0
+              ? b.googleRating
+              : undefined;
+
           const reviewCount =
-            b.reviews > 0 ? b.reviews : b.googleReviews > 0 ? b.googleReviews : undefined;
+            b.reviews > 0
+              ? b.reviews
+              : b.googleReviews > 0
+              ? b.googleReviews
+              : undefined;
 
           return {
             "@type": "ListItem",
@@ -254,6 +577,7 @@ export default function SapancaBungalov() {
           };
         }),
       };
+
       return JSON.stringify(list);
     } catch {
       return "";
@@ -261,6 +585,7 @@ export default function SapancaBungalov() {
   }, [displayedItems]);
 
   /* ---------- JSON-LD (FAQPage) ---------- */
+
   const jsonLdFAQ = useMemo(
     () =>
       JSON.stringify({
@@ -287,7 +612,8 @@ export default function SapancaBungalov() {
           },
           {
             "@type": "Question",
-            name: "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
+            name:
+              "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
             acceptedAnswer: {
               "@type": "Answer",
               text:
@@ -315,44 +641,66 @@ export default function SapancaBungalov() {
 
   return (
     <>
-      {/* ======= SEO HEAD ======= */}
       <Helmet>
-        <title>Sapanca Bungalov Evleri: 20+ Doğrulanmış Tesis (Aracısız) | E-Doğrula</title>
+        <title>
+          Sapanca Bungalov Evleri: 20+ Doğrulanmış Tesis (Aracısız) | E-Doğrula
+        </title>
         <meta
           name="description"
           content="Sapanca'daki en iyi bungalovları mı arıyorsunuz? 🏡 E-Doğrula ile doğrulanmış tesislere aracısız ulaşın, komisyon ödemeyin. Güvenilir tatilin adresi!"
         />
         <link rel="canonical" href={canonical} />
-        {/* Open Graph / Twitter */}
-        <meta property="og:title" content="Sapanca Bungalov Evleri | E-Doğrula" />
-        <meta property="og:description" content="Doğrulanmış işletmeler, aracısız iletişim." />
+        <meta
+          property="og:title"
+          content="Sapanca Bungalov Evleri | E-Doğrula"
+        />
+        <meta
+          property="og:description"
+          content="Doğrulanmış işletmeler, aracısız iletişim."
+        />
         <meta property="og:type" content="website" />
         <meta property="og:url" content={canonical} />
         <meta property="og:image" content="/og/cover-sapanca.jpg" />
         <meta name="twitter:card" content="summary_large_image" />
         {jsonLdItemList && (
-          <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdItemList }} />
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{ __html: jsonLdItemList }}
+          />
         )}
-        <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLdFAQ }} />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: jsonLdFAQ }}
+        />
       </Helmet>
 
       <PageStyles />
+
       <div className="page-shell">
         <nav className="main-nav">
-          <button className="nav-button" onClick={() => navigate("/apply")}>İşletmeni doğrula</button>
-          <button className="nav-button" onClick={() => navigate("/report")}>Şikayet et / Rapor et</button>
+          <button
+            className="nav-button"
+            onClick={() => navigate("/apply")}
+          >
+            İşletmeni doğrula
+          </button>
+          <button
+            className="nav-button"
+            onClick={() => navigate("/report")}
+          >
+            Şikayet et / Rapor et
+          </button>
         </nav>
 
         <main className="content-container">
-          {/* Tekil H1 */}
           <header className="page-title">
             <h1>Sapanca Bungalov Evleri</h1>
             <p className="page-sub">
-              E-Doğrula tarafından doğrulanmış işletmelerle aracısız ve komisyonsuz iletişim kurun.
+              E-Doğrula tarafından doğrulanmış işletmelerle aracısız ve
+              komisyonsuz iletişim kurun.
             </p>
           </header>
 
-          {/* ÜST: Hava durumu + bilgi */}
           <section className="top-knowledge">
             <KnowledgeHeader query="Sapanca" http={api} showMedia />
           </section>
@@ -365,7 +713,9 @@ export default function SapancaBungalov() {
             <>
               {page === 1 && featured.length > 0 && (
                 <section className="sponsored-section">
-                  <h2 className="section-title">Öne Çıkan Tesisler</h2>
+                  <h2 className="section-title">
+                    Öne Çıkan Tesisler
+                  </h2>
                   <div className="horizontal-scroll">
                     {featured.map((it) => (
                       <SponsoredCard key={it.id} business={it} />
@@ -377,12 +727,17 @@ export default function SapancaBungalov() {
               <section>
                 <header className="results-header">
                   <div>
-                    <h2 className="section-title">Tüm Sapanca Bungalovları</h2>
+                    <h2 className="section-title">
+                      Tüm Sapanca Bungalovları
+                    </h2>
                     <p className="intro">
-                      Sapanca’nın eşsiz doğasında, <strong>göl manzaralı</strong> ya da
-                      <strong> jakuzili</strong> seçenekleriyle bungalov tatilinizi planlayın.
-                      Aşağıda, E-Doğrula tarafından doğrulanmış ve <strong>doğrudan iletişim</strong>
-                      kurabileceğiniz tüm işletmeleri bulabilirsiniz.
+                      Sapanca’nın eşsiz doğasında,
+                      <strong> göl manzaralı</strong> ya da
+                      <strong> jakuzili</strong> seçenekleriyle bungalov
+                      tatilinizi planlayın. Aşağıda, E-Doğrula tarafından
+                      doğrulanmış ve
+                      <strong> doğrudan iletişim</strong> kurabileceğiniz
+                      tüm işletmeleri bulabilirsiniz.
                     </p>
                   </div>
 
@@ -391,23 +746,37 @@ export default function SapancaBungalov() {
                       <input
                         type="checkbox"
                         checked={onlyVerified}
-                        onChange={(e) => setOnlyVerified(e.target.checked)}
+                        onChange={(e) =>
+                          setOnlyVerified(e.target.checked)
+                        }
                       />
                       Sadece doğrulanmış
                     </label>
 
                     <div className="sort" ref={sortMenuRef}>
-                      <button className="sort-btn" onClick={() => setSortOpen((v) => !v)}>
+                      <button
+                        className="sort-btn"
+                        onClick={() =>
+                          setSortOpen((prev) => !prev)
+                        }
+                      >
                         <FaFilter />
                         <span className="ml-2">
-                          Sırala: <strong>{sort === "rating" ? "Puan (yüksek)" : "Yorum (çok)"}</strong>
+                          Sırala:{" "}
+                          <strong>
+                            {sort === "rating"
+                              ? "Puan (yüksek)"
+                              : "Yorum (çok)"}
+                          </strong>
                         </span>
                         <FaChevronDown className="ml-2" />
                       </button>
                       {sortOpen && (
                         <div className="sort-menu">
                           <button
-                            className={`sort-item ${sort === "rating" ? "active" : ""}`}
+                            className={`sort-item ${
+                              sort === "rating" ? "active" : ""
+                            }`}
                             onClick={() => {
                               setSort("rating");
                               setSortOpen(false);
@@ -416,7 +785,11 @@ export default function SapancaBungalov() {
                             Puan (yüksek)
                           </button>
                           <button
-                            className={`sort-item ${sort === "reviews" ? "active" : ""}`}
+                            className={`sort-item ${
+                              sort === "reviews"
+                                ? "active"
+                                : ""
+                            }`}
                             onClick={() => {
                               setSort("reviews");
                               setSortOpen(false);
@@ -430,7 +803,6 @@ export default function SapancaBungalov() {
                   </div>
                 </header>
 
-                {/* ORGANİK SONUÇLAR: görselsiz satırlar + sağda Google puanı */}
                 <div className="results-grid">
                   {displayedItems.map((b) => (
                     <ResultRow key={b.id} b={b} />
@@ -438,16 +810,17 @@ export default function SapancaBungalov() {
                 </div>
 
                 {totalPages > 1 && (
-                  <Pagination page={page} total={totalPages} onChange={setPage} />
+                  <Pagination
+                    page={page}
+                    total={totalPages}
+                    onChange={setPage}
+                  />
                 )}
               </section>
             </>
           )}
 
-          {/* EN ALTA: Planlama makaleleri */}
           <IdeasSection />
-
-          {/* EN ALTA: SSS */}
           <FAQSection />
         </main>
       </div>
@@ -455,17 +828,27 @@ export default function SapancaBungalov() {
   );
 }
 
-/* ================== Alt Bileşenler ================== */
+/* ================== COMPONENTS ================== */
+
 function SponsoredCard({ business }) {
   const navigate = useNavigate();
   return (
     <div
       className="sponsored-card"
-      onClick={() => business.slug && navigate(`/isletme/${encodeURIComponent(business.slug)}`)}
+      onClick={() =>
+        business.slug &&
+        navigate(
+          `/isletme/${encodeURIComponent(business.slug)}`
+        )
+      }
     >
       <div className="sponsored-image-wrapper">
         {business.photo ? (
-          <img src={business.photo} alt={business.name} className="sponsored-image" />
+          <img
+            src={business.photo}
+            alt={business.name}
+            className="sponsored-image"
+          />
         ) : (
           <div className="sponsored-image-fallback">
             <FaBuilding />
@@ -474,17 +857,25 @@ function SponsoredCard({ business }) {
         <span className="sponsored-tag">Sponsorlu</span>
       </div>
       <div className="sponsored-card-content">
-        <h3 className="sponsored-title">{business.name}</h3>
-        <p className="sponsored-location">{business.address?.split(",")[0]}</p>
+        <h3 className="sponsored-title">
+          {business.name}
+        </h3>
+        <p className="sponsored-location">
+          {business.address?.split(",")[0]}
+        </p>
       </div>
     </div>
   );
 }
 
-/* --------- ORGANİK sonuç satırı: SAĞDA GOOGLE SKOR KARTI --------- */
 function ResultRow({ b }) {
   const navigate = useNavigate();
-  const onOpen = () => b.slug && navigate(`/isletme/${encodeURIComponent(b.slug)}`);
+
+  const onOpen = () => {
+    if (b.slug) {
+      navigate(`/isletme/${encodeURIComponent(b.slug)}`);
+    }
+  };
 
   const hasEDogrula = b.rating > 0;
   const hasGoogle = b.googleRating > 0 || b.googleReviews > 0;
@@ -521,7 +912,8 @@ function ResultRow({ b }) {
         </a>
 
         <div className="handle-type">
-          {b.instagramHandle ? `@${b.instagramHandle}` : ""} · {b.type || "Bungalov"} · {b.address}
+          {b.instagramHandle && `@${b.instagramHandle} · `}
+          {b.type || "Bungalov"} · {b.address}
         </div>
 
         <p className="summary">{b.summary}</p>
@@ -534,7 +926,7 @@ function ResultRow({ b }) {
           )}
           {b.website && (
             <a
-              href={/^https?:\/\//i.test(b.website) ? b.website : `https://${b.website}`}
+              href={b.website}
               target="_blank"
               rel="noreferrer noopener"
               className="link-btn"
@@ -543,14 +935,18 @@ function ResultRow({ b }) {
             </a>
           )}
           {b.instagramUrl && (
-            <a href={b.instagramUrl} target="_blank" rel="noreferrer noopener" className="link-btn">
+            <a
+              href={b.instagramUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="link-btn"
+            >
               <FaInstagram /> Instagram
             </a>
           )}
         </div>
       </div>
 
-      {/* Sağ kart: Google puanı + yorum adedi */}
       <div className="gscore-col">
         <div className="gscore-card">
           <div className="gscore-top">Google</div>
@@ -558,14 +954,18 @@ function ResultRow({ b }) {
             <FaStar className="gscore-star" />
             {hasGoogle ? (
               <span className="gscore-value">
-                {b.googleRating > 0 ? b.googleRating.toFixed(1) : "—"}
+                {b.googleRating > 0
+                  ? b.googleRating.toFixed(1)
+                  : "—"}
               </span>
             ) : (
               <span className="gscore-muted">puan yok</span>
             )}
           </div>
           <div className="gscore-bottom">
-            {b.googleReviews > 0 ? `${b.googleReviews} yorum` : ""}
+            {b.googleReviews > 0
+              ? `${b.googleReviews} yorum`
+              : ""}
           </div>
         </div>
       </div>
@@ -573,7 +973,8 @@ function ResultRow({ b }) {
   );
 }
 
-/* ---------- EN ALTA: “Planlayın” bölümü (dinamik) ---------- */
+/* ---------- IdeasSection ---------- */
+
 function IdeasSection() {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState([]);
@@ -581,15 +982,23 @@ function IdeasSection() {
   useEffect(() => {
     let alive = true;
     setLoading(true);
+
     api
-      .get("/api/cms/articles/featured", { params: { place: "Sapanca", limit: 3 } })
+      .get("/api/cms/articles/featured", {
+        params: { place: "Sapanca", limit: 3 },
+      })
       .then(({ data }) => {
         if (!alive) return;
-        const items = Array.isArray(data?.items) ? data.items : [];
+        const items = Array.isArray(data?.items)
+          ? data.items
+          : [];
         setPosts(items);
       })
       .catch(() => setPosts([]))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+
     return () => {
       alive = false;
     };
@@ -598,32 +1007,36 @@ function IdeasSection() {
   const fallback = [
     {
       title: "Sapanca’da Jakuzili En İyi 7 Bungalov (2025)",
-      desc: "Jakuzili, şömineli ve doğa içinde konaklayabileceğiniz en iyi bungalovlar.",
+      desc:
+        "Jakuzili, şömineli ve doğa içinde konaklayabileceğiniz en iyi bungalovlar.",
       to: "/blog/jakuzili-bungalovlar",
       image: "",
     },
     {
       title: "Sapanca Gölü Kenarında Görülmesi Gereken Yerler",
-      desc: "Göl çevresi rotaları, gün batımı noktaları ve lezzet durakları.",
+      desc:
+        "Göl çevresi rotaları, gün batımı noktaları ve lezzet durakları.",
       to: "/blog/gol-kenari-gezilecek-yerler",
       image: "",
     },
     {
       title: "Evcil Hayvan Dostu Sapanca Konaklama Rehberi",
-      desc: "Patili dostunuzla rahat konaklayabileceğiniz işletmeler.",
+      desc:
+        "Patili dostunuzla rahat konaklayabileceğiniz işletmeler.",
       to: "/blog/evcil-dostu-isletmeler",
       image: "",
     },
   ];
 
-  const cards = posts.length
-    ? posts.map((p) => ({
-        title: p.title,
-        desc: p.excerpt || "",
-        to: p.to || `/blog/${p.slug}`,
-        image: p.image || "",
-      }))
-    : fallback;
+  const cards =
+    posts && posts.length
+      ? posts.map((p) => ({
+          title: p.title,
+          desc: p.excerpt || "",
+          to: p.to || `/blog/${p.slug}`,
+          image: p.image || "",
+        }))
+      : fallback;
 
   const jsonLd = {
     "@context": "https://schema.org",
@@ -637,7 +1050,10 @@ function IdeasSection() {
       publisher: {
         "@type": "Organization",
         name: "E-Doğrula",
-        logo: { "@type": "ImageObject", url: "/logo192.png" },
+        logo: {
+          "@type": "ImageObject",
+          url: "/logo192.png",
+        },
       },
     })),
   };
@@ -647,62 +1063,92 @@ function IdeasSection() {
       <h2 className="ideas-title">Sapanca Tatilinizi Planlayın</h2>
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(jsonLd),
+        }}
       />
       <div className="ideas-grid">
-        {(loading ? Array.from({ length: 3 }) : cards).map((c, i) =>
-          loading ? (
-            <div key={i} className="ideas-card">
-              <div className="ideas-media" />
-              <div className="ideas-overlay" />
-              <div className="ideas-body">
-                <h3 className="ideas-h3">Yükleniyor…</h3>
-                <p className="ideas-p">Lütfen bekleyin.</p>
+        {(loading ? Array.from({ length: 3 }) : cards).map(
+          (c, i) =>
+            loading ? (
+              <div key={i} className="ideas-card">
+                <div className="ideas-media" />
+                <div className="ideas-overlay" />
+                <div className="ideas-body">
+                  <h3 className="ideas-h3">Yükleniyor…</h3>
+                  <p className="ideas-p">
+                    Lütfen bekleyin.
+                  </p>
+                </div>
               </div>
-            </div>
-          ) : (
-            <a key={i} className="ideas-card" href={c.to}>
-              <div
-                className={`ideas-media ${c.image ? "with-img" : ""}`}
-                style={c.image ? { backgroundImage: `url(${c.image})`, backgroundSize: "cover", backgroundPosition: "center" } : undefined}
-              />
-              <div className="ideas-overlay" />
-              <div className="ideas-body">
-                <h3 className="ideas-h3">{c.title}</h3>
-                <p className="ideas-p">{c.desc}</p>
-                <span className="ideas-link">Devamını Oku →</span>
-              </div>
-            </a>
-          )
+            ) : (
+              <a
+                key={i}
+                className="ideas-card"
+                href={c.to}
+              >
+                <div
+                  className={`ideas-media ${
+                    c.image ? "with-img" : ""
+                  }`}
+                  style={
+                    c.image
+                      ? {
+                          backgroundImage: `url(${c.image})`,
+                          backgroundSize: "cover",
+                          backgroundPosition: "center",
+                        }
+                      : undefined
+                  }
+                />
+                <div className="ideas-overlay" />
+                <div className="ideas-body">
+                  <h3 className="ideas-h3">{c.title}</h3>
+                  <p className="ideas-p">{c.desc}</p>
+                  <span className="ideas-link">
+                    Devamını Oku →
+                  </span>
+                </div>
+              </a>
+            )
         )}
       </div>
     </section>
   );
 }
 
-/* ---------- EN ALTA: SSS (görünür içerik) ---------- */
+/* ---------- FAQSection ---------- */
+
 function FAQSection() {
   const faqs = [
     {
       q: "Sapanca bungalov fiyatları ne kadar?",
-      a: "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan iletişime geçerek güncel fiyat bilgisini alabilirsiniz.",
+      a:
+        "Sezona, konuma ve olanaklara göre değişir. İşletmelerle doğrudan iletişime geçerek güncel fiyat bilgisini alabilirsiniz.",
     },
     {
       q: "Evcil hayvan kabul eden bungalov var mı?",
-      a: "Birçok işletme evcil dostu. İlgili işletme sayfasındaki politika kısmını inceleyin veya telefonla teyit edin.",
+      a:
+        "Birçok işletme evcil dostu. İlgili işletme sayfasındaki politika kısmını inceleyin veya telefonla teyit edin.",
     },
     {
-      q: "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
-      a: "Evet. Açıklamalarda belirtilir; ayrıca telefonla sormanız önerilir.",
+      q:
+        "Jakuzili, göl manzaralı ya da şömineli seçenek var mı?",
+      a:
+        "Evet. Açıklamalarda belirtilir; ayrıca telefonla sormanız önerilir.",
     },
     {
       q: "E-Doğrula ne yapıyor?",
-      a: "Aracısız, komisyonsuz bir şekilde işletme ile sizi doğrudan buluşturur.",
+      a:
+        "Aracısız, komisyonsuz bir şekilde işletme ile sizi doğrudan buluşturur.",
     },
   ];
+
   return (
     <section className="faq">
-      <h2 className="section-title">Sıkça Sorulan Sorular</h2>
+      <h2 className="section-title">
+        Sıkça Sorulan Sorular
+      </h2>
       <div className="faq-list">
         {faqs.map((f, i) => (
           <details key={i} className="faq-item">
@@ -716,6 +1162,7 @@ function FAQSection() {
 }
 
 /* ---------- Skeleton & Empty ---------- */
+
 function SkeletonList() {
   return (
     <div className="results-grid">
@@ -725,77 +1172,127 @@ function SkeletonList() {
     </div>
   );
 }
+
 function EmptyState() {
-  return <div className="result-row">Sonuç bulunamadı.</div>;
+  return (
+    <div className="result-row">
+      Sonuç bulunamadı.
+    </div>
+  );
 }
 
-/* ---------- Google benzeri bilgi bloğu ---------- */
-function KnowledgeHeader({ query = "Sapanca", http, showMedia = false }) {
+/* ---------- KnowledgeHeader ---------- */
+
+function KnowledgeHeader({
+  query = "Sapanca",
+  http,
+  showMedia = false,
+}) {
   const [data, setData] = useState(null);
   const apiClient = http || axios;
 
-  const strip = (s) => String(s || "").replace(/<[^>]*>/g, "");
+  const strip = (s) =>
+    String(s || "").replace(/<[^>]*>/g, "");
 
-  const MAPS_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const MAPS_KEY =
+    import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
   useEffect(() => {
     let alive = true;
+
     (async () => {
       try {
-        const { data } = await apiClient.get(`/api/geo/knowledge`, { params: { q: query } });
+        const { data } = await apiClient.get(
+          `/api/geo/knowledge`,
+          { params: { q: query } }
+        );
         if (alive) setData(data);
-      } catch {}
+      } catch {
+        // sessiz düş
+      }
     })();
+
     return () => {
       alive = false;
     };
-  }, [query]);
+  }, [query, apiClient]);
 
   if (!data) return null;
 
-  const title = strip(data?.title || query);
-  const subtitle = strip(data?.subtitle || "");
-  const summary = strip(data?.summary || "");
-  const wikiUrl = data?.wiki_url || null;
-  const gmapUrl = data?.gmap_url || null;
-  const coords = data?.coordinates || null;
-  const now = data?.weather?.current_weather || null;
-  const daily = data?.weather?.daily || null;
+  const title = strip(data.title || query);
+  const subtitle = strip(data.subtitle || "");
+  const summary = strip(data.summary || "");
+  const wikiUrl = data.wiki_url || null;
+  const gmapUrl = data.gmap_url || null;
+  const coords = data.coordinates || null;
+  const now = data.weather?.current_weather || null;
+  const daily = data.weather?.daily || null;
 
   let staticMap = null;
-  if (MAPS_KEY && coords?.lat != null && coords?.lng != null) {
+  if (
+    MAPS_KEY &&
+    coords?.lat != null &&
+    coords?.lng != null
+  ) {
     const { lat, lng } = coords;
     staticMap = `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=12&scale=2&size=640x320&maptype=roadmap&markers=color:0x2563eb|${lat},${lng}&key=${MAPS_KEY}`;
   }
 
-  const image = data?.image || data?.thumbnail || null;
+  const image = data.image || data.thumbnail || null;
 
   return (
-    <section className={`kb ${showMedia ? "kb-has-media" : ""}`}>
+    <section
+      className={`kb ${
+        showMedia ? "kb-has-media" : ""
+      }`}
+    >
       {showMedia && (
         <div className="kb-media">
-          {image ? <img src={image} alt={title} /> : <div className="kb-media-ph" />}
+          {image ? (
+            <img src={image} alt={title} />
+          ) : (
+            <div className="kb-media-ph" />
+          )}
         </div>
       )}
 
       {staticMap && (
-        <a className="kb-map" href={gmapUrl || "#"} target="_blank" rel="noreferrer">
+        <a
+          className="kb-map"
+          href={gmapUrl || "#"}
+          target="_blank"
+          rel="noreferrer"
+        >
           <img src={staticMap} alt="Harita" />
         </a>
       )}
 
       <div className="kb-info">
         <h2 className="kb-title">{title}</h2>
-        {subtitle && <div className="kb-sub">{subtitle}</div>}
-        {summary && <p className="kb-text">{summary}</p>}
+        {subtitle && (
+          <div className="kb-sub">{subtitle}</div>
+        )}
+        {summary && (
+          <p className="kb-text">{summary}</p>
+        )}
         <div className="kb-links">
           {wikiUrl && (
-            <a className="kb-link" href={wikiUrl} target="_blank" rel="noreferrer">
+            <a
+              className="kb-link"
+              href={wikiUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
               Wikipedia
             </a>
           )}
           {gmapUrl && (
-            <a className="kb-link" href={gmapUrl} target="_blank" rel="noreferrer">
+            <a
+              className="kb-link"
+              href={gmapUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
               Haritada gör
             </a>
           )}
@@ -805,26 +1302,61 @@ function KnowledgeHeader({ query = "Sapanca", http, showMedia = false }) {
       {now && (
         <div className="kb-weather">
           <div className="kb-weather-card">
-            <div className="kb-weather-label">Şu an hava</div>
-            <div className="kb-weather-temp">{Math.round(now.temperature)}°</div>
-            <div className="kb-weather-wind">rüzgâr {Math.round(now.windspeed)} km/s</div>
-          </div>
-          {daily?.temperature_2m_max && daily?.temperature_2m_min && (
-            <div className="kb-forecast">
-              {daily.time?.slice(0, 3).map((_, i) => (
-                <div key={i} className="kb-forecast-item">
-                  <div className="kb-forecast-day">
-                    {new Date(daily.time[i]).toLocaleDateString("tr-TR", { weekday: "short" })}
-                  </div>
-                  <div className="kb-forecast-temps">
-                    {Math.round(daily.temperature_2m_max[i])}° / {Math.round(daily.temperature_2m_min[i])}°
-                  </div>
-                </div>
-              ))}
+            <div className="kb-weather-label">
+              Şu an hava
             </div>
-          )}
+            <div className="kb-weather-temp">
+              {Math.round(now.temperature)}°
+            </div>
+            <div className="kb-weather-wind">
+              rüzgâr {Math.round(now.windspeed)} km/s
+            </div>
+          </div>
+
+          {daily?.temperature_2m_max &&
+            daily?.temperature_2m_min && (
+              <div className="kb-forecast">
+                {daily.time
+                  ?.slice(0, 3)
+                  .map((_, i) => (
+                    <div
+                      key={i}
+                      className="kb-forecast-item"
+                    >
+                      <div className="kb-forecast-day">
+                        {new Date(
+                          daily.time[i]
+                        ).toLocaleDateString(
+                          "tr-TR",
+                          {
+                            weekday: "short",
+                          }
+                        )}
+                      </div>
+                      <div className="kb-forecast-temps">
+                        {Math.round(
+                          daily
+                            .temperature_2m_max[i]
+                        )}
+                        ° /{" "}
+                        {Math.round(
+                          daily
+                            .temperature_2m_min[i]
+                        )}
+                        °
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            )}
+
           {gmapUrl && (
-            <a className="kb-route" href={gmapUrl} target="_blank" rel="noreferrer">
+            <a
+              className="kb-route"
+              href={gmapUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
               Yol tarifi
             </a>
           )}
@@ -834,7 +1366,8 @@ function KnowledgeHeader({ query = "Sapanca", http, showMedia = false }) {
   );
 }
 
-/* ================== Stiller ================== */
+/* ================== STYLES ================== */
+
 function PageStyles() {
   return (
     <style>{`
@@ -852,15 +1385,15 @@ function PageStyles() {
 
       .content-container{ max-width:1200px; margin-left:clamp(14px, 3.2vw, 32px); margin-right:auto; padding:28px 0 96px; }
 
-      /* Page title */
       .page-title{ margin-bottom:12px; }
       .page-title h1{ font-size:28px; font-weight:900; margin:0; color:#0f172a; }
       .page-sub{ margin:6px 0 0; color:#334155; }
 
-      /* Intro text */
       .intro{ margin:6px 0 0; color:#334155; max-width:780px; }
 
-      /* Ideas (Planlayın) */
+      .section-title{ font-size:22px; font-weight:800; color:#1e293b; margin:12px 0; }
+
+      /* Ideas */
       .ideas{ margin:26px 0 6px; }
       .ideas.bottom{ margin-top:36px; }
       .ideas-title{ font-size:20px; font-weight:800; color:#1e293b; margin:6px 0 12px; }
@@ -876,91 +1409,103 @@ function PageStyles() {
       .ideas-p{ margin:0 0 10px; font-size:13px; opacity:.95; }
       .ideas-link{ font-weight:800; }
 
-      /* Bölüm başlıkları */
-      .section-title{ font-size:22px; font-weight:800; color:#1e293b; margin:12px 0; }
-
       /* Sponsorlar */
       .sponsored-section{ margin:6px 0 24px; }
-      .horizontal-scroll{ display:flex; gap:18px; overflow-x:auto; padding: 4px 0 16px; -webkit-overflow-scrolling:touch; }
-      .horizontal-scroll::-webkit-scrollbar{ display:none; } .horizontal-scroll{ scrollbar-width:none; }
-      .sponsored-card{ flex:0 0 320px; background:var(--card); border-radius:16px; border:1px solid var(--border); overflow:hidden; cursor:pointer; transition: transform .2s, box-shadow .2s; }
+      .horizontal-scroll{ display:flex; gap:18px; overflow-x:auto; padding:4px 0 16px; -webkit-overflow-scrolling:touch; }
+      .horizontal-scroll::-webkit-scrollbar{ display:none; }
+      .horizontal-scroll{ scrollbar-width:none; }
+      .sponsored-card{ flex:0 0 320px; background:var(--card); border-radius:16px; border:1px solid var(--border);
+        overflow:hidden; cursor:pointer; transition: transform .2s, box-shadow .2s; }
       .sponsored-card:hover{ transform:translateY(-4px); box-shadow:0 14px 28px rgba(0,0,0,.08); }
       .sponsored-image-wrapper{ height:180px; position:relative; background:#eef2f7; }
       .sponsored-image{ width:100%; height:100%; object-fit:cover; }
-      .sponsored-image-fallback{ width:100%; height:100%; display:grid; place-items:center; font-size:34px; color:var(--muted); }
-      .sponsored-tag{ position:absolute; top:10px; left:10px; background:rgba(0,0,0,.6); color:#fff; padding:4px 8px; border-radius:6px; font-size:11px; font-weight:800; letter-spacing:.2px; }
+      .sponsored-image-fallback{ width:100%; height:100%; display:grid; place-items:center; font-size:34px; color:#64748b; }
+      .sponsored-tag{ position:absolute; top:10px; left:10px; background:rgba(0,0,0,.6); color:#fff; padding:4px 8px; border-radius:6px;
+        font-size:11px; font-weight:800; letter-spacing:.2px; }
       .sponsored-card-content{ padding:12px; }
       .sponsored-title{ font-size:17px; font-weight:800; margin:0 0 4px; }
-      .sponsored-location{ font-size:14px; color:var(--muted); margin:0; }
+      .sponsored-location{ font-size:14px; color:#64748b; margin:0; }
 
       /* Filtre barı */
-      .results-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:12px 16px; border-radius:14px; border:1px solid var(--border); background:var(--card); margin-bottom:18px; }
+      .results-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:12px 16px;
+        border-radius:14px; border:1px solid var(--border); background:var(--card); margin-bottom:18px; }
       .filters{ display:flex; align-items:center; gap:16px; position:relative; }
       .filter-checkbox{ display:inline-flex; gap:8px; align-items:center; cursor:pointer; font-size:14px; }
       .sort{ position:relative; }
-      .sort-btn{ display:inline-flex; align-items:center; gap:8px; background:#fff; border:1px solid var(--border); padding:8px 12px; border-radius:12px; font-weight:700; }
-      .sort-menu{ position:absolute; right:0; top:42px; z-index:20; width:220px; background:#fff; border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.08); overflow:hidden; }
+      .sort-btn{ display:inline-flex; align-items:center; gap:8px; background:#fff; border:1px solid var(--border);
+        padding:8px 12px; border-radius:12px; font-weight:700; }
+      .sort-menu{ position:absolute; right:0; top:42px; z-index:20; width:220px; background:#fff; border:1px solid var(--border);
+        border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.08); overflow:hidden; }
       .sort-item{ display:block; width:100%; text-align:left; padding:10px 12px; background:#fff; border:0; font-size:14px; }
       .sort-item:hover{ background:#f8fafc; }
       .sort-item.active{ background:#eef2f7; font-weight:800; }
 
-      /* Sonuçlar — görselsiz satır kartları */
+      /* Sonuç listesi */
       .results-grid{ display:grid; gap:16px; }
-      .result-row{ display:grid; grid-template-columns: 1fr 160px; gap:16px; background:var(--card); padding:14px; border-radius:16px; border:1px solid var(--border); transition: box-shadow .2s; }
+      .result-row{ display:grid; grid-template-columns: 1fr 160px; gap:16px; background:var(--card); padding:14px;
+        border-radius:16px; border:1px solid var(--border); transition: box-shadow .2s; }
       .result-row:hover{ box-shadow:0 10px 24px rgba(0,0,0,.06); }
-      .result-row.skeleton{ height:128px; background:linear-gradient(90deg,#f3f4f6,#eef2f7,#f3f4f6); background-size:200% 100%; animation:shimmer 1.2s infinite; }
+      .result-row.skeleton{ height:128px; background:linear-gradient(90deg,#f3f4f6,#eef2f7,#f3f4f6);
+        background-size:200% 100%; animation:shimmer 1.2s infinite; }
       @keyframes shimmer{ 0%{background-position:0 0} 100%{background-position:-200% 0} }
 
       .meta-top{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:6px; }
-      .badge-verified{ display:inline-flex; gap:6px; align-items:center; color:var(--green); font-weight:900; }
-      .badge-rating{ display:inline-flex; gap:6px; align-items:center; color:var(--yellow); font-weight:900; }
-      .badge-muted{ display:inline-flex; gap:6px; align-items:center; color:var(--muted); }
+      .badge-verified{ display:inline-flex; gap:6px; align-items:center; color:#16a34a; font-weight:900; }
+      .badge-rating{ display:inline-flex; gap:6px; align-items:center; color:#f59e0b; font-weight:900; }
+      .badge-muted{ display:inline-flex; gap:6px; align-items:center; color:#64748b; }
 
-      .title{ font-size:18px; font-weight:800; color:var(--brand); text-decoration:none; display:block; margin:0 0 4px; }
+      .title{ font-size:18px; font-weight:800; color:#2563eb; text-decoration:none; display:block; margin:0 0 4px; }
       .title:hover{ text-decoration:underline; }
-      .handle-type{ font-size:13px; color:var(--muted); }
+      .handle-type{ font-size:13px; color:#64748b; }
       .summary{ font-size:14px; color:#334155; line-height:1.55; margin:8px 0 10px; }
 
       .links{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
-      .link-btn{ display:inline-flex; gap:8px; align-items:center; background:#f1f5f9; border:1px solid transparent; padding:6px 12px; border-radius:8px; font-size:14px; font-weight:700; color:var(--muted); text-decoration:none; transition:.2s; }
-      .link-btn:hover{ background:#e2e8f0; color:var(--fg); }
+      .link-btn{ display:inline-flex; gap:8px; align-items:center; background:#f1f5f9; border:1px solid transparent;
+        padding:6px 12px; border-radius:8px; font-size:14px; font-weight:700; color:#64748b; text-decoration:none;
+        transition:.2s; }
+      .link-btn:hover{ background:#e2e8f0; color:#0f172a; }
 
       /* Google Score Kartı */
       .gscore-col{ display:flex; align-items:center; justify-content:flex-end; }
       .gscore-card{ width:160px; border:1px solid var(--border); border-radius:14px; padding:10px; text-align:center; }
-      .gscore-top{ font-size:12px; color:var(--muted); margin-bottom:6px; }
+      .gscore-top{ font-size:12px; color:#64748b; margin-bottom:6px; }
       .gscore-center{ display:flex; align-items:center; justify-content:center; gap:6px; margin-bottom:4px; }
       .gscore-star{ color:#f59e0b; }
       .gscore-value{ font-weight:900; font-size:18px; }
-      .gscore-muted{ color:var(--muted); font-weight:700; }
-      .gscore-bottom{ font-size:12px; color:var(--muted); }
+      .gscore-muted{ color:#64748b; font-weight:700; }
+      .gscore-bottom{ font-size:12px; color:#64748b; }
 
       /* Üst bilgi bloğu */
       .top-knowledge{ margin-bottom:18px; }
-      .kb{ display:grid; grid-template-columns: 2fr 2fr 1.2fr; gap:16px; align-items:stretch; border:1px solid var(--border); background:var(--card); border-radius:16px; padding:16px; }
+      .kb{ display:grid; grid-template-columns: 2fr 2fr 1.2fr; gap:16px; align-items:stretch;
+        border:1px solid var(--border); background:var(--card); border-radius:16px; padding:16px; }
       .kb-has-media{ grid-template-columns: 1.5fr 1.5fr 1.2fr; }
-      .kb-media{ border:1px solid var(--border); border-radius:14px; overflow:hidden; background:linear-gradient(180deg,#f3f6ff,#fff); min-height:180px; }
+      .kb-media{ border:1px solid var(--border); border-radius:14px; overflow:hidden;
+        background:linear-gradient(180deg,#f3f6ff,#fff); min-height:180px; }
       .kb-media img{ width:100%; height:100%; object-fit:cover; display:block; }
-      .kb-media-ph{ width:100%; height:100%; min-height:180px; background:repeating-linear-gradient(45deg,#eef2ff,#eef2ff 10px,#f8fafc 10px,#f8fafc 20px); }
+      .kb-media-ph{ width:100%; height:100%; min-height:180px;
+        background:repeating-linear-gradient(45deg,#eef2ff,#eef2ff 10px,#f8fafc 10px,#f8fafc 20px); }
       .kb-map{ border:1px solid var(--border); border-radius:14px; overflow:hidden; display:block; background:#eef2f7; }
       .kb-map img{ width:100%; height:100%; object-fit:cover; display:block; }
       .kb-info{ border:1px solid var(--border); border-radius:14px; padding:12px; }
       .kb-title{ font-size:22px; font-weight:800; color:#1e293b; margin:0; }
-      .kb-sub{ font-size:12px; color:var(--muted); margin-top:2px; }
+      .kb-sub{ font-size:12px; color:#64748b; margin-top:2px; }
       .kb-text{ margin-top:10px; color:#334155; line-height:1.55; }
       .kb-links{ display:flex; gap:14px; margin-top:10px; }
       .kb-link{ color:#2563eb; text-decoration:none; font-weight:700; }
       .kb-link:hover{ text-decoration:underline; }
       .kb-weather{ display:flex; flex-direction:column; gap:12px; }
       .kb-weather-card{ text-align:center; border:1px solid var(--border); border-radius:14px; padding:10px; }
-      .kb-weather-label{ font-size:12px; color:var(--muted); }
+      .kb-weather-label{ font-size:12px; color:#64748b; }
       .kb-weather-temp{ font-size:32px; font-weight:900; }
-      .kb-weather-wind{ font-size:12px; color:var(--muted); }
+      .kb-weather-wind{ font-size:12px; color:#64748b; }
       .kb-forecast{ display:grid; grid-template-columns: repeat(3,1fr); gap:8px; }
       .kb-forecast-item{ border:1px solid var(--border); border-radius:10px; padding:8px; text-align:center; font-weight:700; }
-      .kb-forecast-day{ font-size:12px; color:var(--muted); }
+      .kb-forecast-day{ font-size:12px; color:#64748b; }
       .kb-forecast-temps{ font-size:14px; }
-      .kb-route{ display:block; text-align:center; font-weight:800; border:1px solid var(--border); border-radius:10px; padding:10px; text-decoration:none; color:var(--fg); background:#fff; }
+
+      .kb-route{ display:block; text-align:center; font-weight:800; border:1px solid var(--border);
+        border-radius:10px; padding:10px; text-decoration:none; color:#0f172a; background:#fff; }
 
       /* FAQ */
       .faq{ margin-top:26px; }
@@ -974,8 +1519,8 @@ function PageStyles() {
       .pager-btn{ padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:#fff; cursor:pointer; }
       .pager-btn[disabled]{ opacity:.6; cursor:not-allowed; }
       .pager-num{ width:40px; height:40px; border-radius:999px; border:1px solid var(--border); background:#fff; cursor:pointer; }
-      .pager-num.active{ background:var(--ink); color:#fff; border-color:var(--ink); }
-      .pager-gap{ padding:0 4px; color:var(--muted); }
+      .pager-num.active{ background:#1f2937; color:#fff; border-color:#1f2937; }
+      .pager-gap{ padding:0 4px; color:#64748b; }
 
       @media (max-width: 980px){
         .ideas-grid{ grid-template-columns: 1fr; }
@@ -987,37 +1532,67 @@ function PageStyles() {
   );
 }
 
-/* ---------- Basit sayfalama ---------- */
+/* ---------- Pagination ---------- */
+
 function Pagination({ page, total, onChange }) {
   const win = 2;
   const pages = [];
+
   for (let p = 1; p <= total; p++) {
-    if (p === 1 || p === total || (p >= page - win && p <= page + win)) {
+    if (
+      p === 1 ||
+      p === total ||
+      (p >= page - win && p <= page + win)
+    ) {
       pages.push(p);
     } else if (pages[pages.length - 1] !== "...") {
       pages.push("...");
     }
   }
+
   return (
-    <div className="pager" role="navigation" aria-label="Sayfalama">
-      <button className="pager-btn" disabled={page <= 1} onClick={() => onChange(page - 1)}>
+    <div
+      className="pager"
+      role="navigation"
+      aria-label="Sayfalama"
+    >
+      <button
+        className="pager-btn"
+        disabled={page <= 1}
+        onClick={() => onChange(page - 1)}
+      >
         ‹ Önceki
       </button>
+
       {pages.map((p, i) =>
         p === "..." ? (
-          <span key={`gap-${i}`} className="pager-gap">…</span>
+          <span
+            key={`gap-${i}`}
+            className="pager-gap"
+          >
+            …
+          </span>
         ) : (
           <button
             key={p}
-            className={`pager-num ${p === page ? "active" : ""}`}
+            className={`pager-num ${
+              p === page ? "active" : ""
+            }`}
             onClick={() => onChange(p)}
-            aria-current={p === page ? "page" : undefined}
+            aria-current={
+              p === page ? "page" : undefined
+            }
           >
             {p}
           </button>
         )
       )}
-      <button className="pager-btn" disabled={page >= total} onClick={() => onChange(page + 1)}>
+
+      <button
+        className="pager-btn"
+        disabled={page >= total}
+        onClick={() => onChange(page + 1)}
+      >
         Sonraki ›
       </button>
     </div>

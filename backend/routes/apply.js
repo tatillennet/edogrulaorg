@@ -13,7 +13,8 @@ const router = express.Router();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /* ================== Multer ================== */
-// Her alan adını kabul et; tip filtre geniş (octet-stream dâhil)
+// Not: MIN şartı yok. Maks 5 görsel kuralını biz kendimiz uygulayacağız.
+// PDF + görsel toplamı için çok esnek üst limit bırakıyoruz.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024, files: 20 },
@@ -31,6 +32,7 @@ const upload = multer({
 
 /* ================== Paths & helpers ================== */
 const UPLOADS_ROOT = path.resolve(process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads"));
+const MAX_IMAGES = 5; // ← Maksimum 5 görsel koşulu (zorunlu değil, üst sınır)
 
 const safeName = (name = "file") =>
   String(name).replace(/[^\w.\-]+/g, "_").replace(/^_+/, "").slice(0, 80);
@@ -76,43 +78,20 @@ router.post("/", upload.any(), async (req, res) => {
     /* ---- Normalizasyon ---- */
     const businessName =
       (pickFirst(req.body, [
-        "businessName",
-        "business",
-        "name",
-        "isletme",
-        "firma",
-        "company",
-        "companyName",
-        "title",
+        "businessName", "business", "name", "isletme", "firma", "company", "companyName", "title",
       ]) || "").toString().trim();
 
     const termsAccepted =
-      ["termsAccepted", "terms", "acceptTerms", "accepted", "agree", "kvkk", "policy"].some(
-        (k) => truthy(req.body[k])
-      ) || false;
+      ["termsAccepted","terms","acceptTerms","accepted","agree","kvkk","policy"]
+        .some((k) => truthy(req.body[k])) || false;
 
-    const legalName =
-      pickFirst(req.body, ["legalName", "unvan", "ticariUnvan", "legal", "tradeTitle"]) || "";
-
-    const type = pickFirst(req.body, ["type", "tur", "category"]) || "";
-    const address = pickFirst(req.body, ["address", "adres"]) || "";
-
-    const phoneMobile =
-      pickFirst(req.body, ["phoneMobile", "mobile", "telefon", "gsm", "phone"]) || "";
-
-    const phoneFixed =
-      pickFirst(req.body, ["phoneFixed", "sabit", "tel", "landline"]) || "";
-
-    const instagram =
-      pickFirst(req.body, [
-        "instagram",
-        "ig",
-        "instagramUrl",
-        "instagramHandle",
-        "instagramUsername",
-      ]) || "";
-
-    const website = pickFirst(req.body, ["website", "web", "site", "url"]) || "";
+    const legalName = pickFirst(req.body, ["legalName", "unvan", "ticariUnvan", "legal", "tradeTitle"]) || "";
+    const type      = pickFirst(req.body, ["type", "tur", "category"]) || "";
+    const address   = pickFirst(req.body, ["address", "adres"]) || "";
+    const phoneMobile = pickFirst(req.body, ["phoneMobile", "mobile", "telefon", "gsm", "phone"]) || "";
+    const phoneFixed  = pickFirst(req.body, ["phoneFixed", "sabit", "tel", "landline"]) || "";
+    const instagram = pickFirst(req.body, ["instagram","ig","instagramUrl","instagramHandle","instagramUsername"]) || "";
+    const website   = pickFirst(req.body, ["website", "web", "site", "url"]) || "";
 
     if (!businessName) return res.status(400).json({ ok: false, code: "BUSINESS_NAME_REQUIRED" });
     if (!termsAccepted) return res.status(400).json({ ok: false, code: "TERMS_REQUIRED" });
@@ -129,7 +108,12 @@ router.post("/", upload.any(), async (req, res) => {
     for (const f of req.files || []) {
       const { isPdf, isImg } = classifyFile(f);
 
-      // Benzersiz isim gövdesi
+      // Maksimum görsel sınırı (fazlaları yumuşak şekilde atla)
+      if (isImg && savedImages.length >= MAX_IMAGES) {
+        skipped.push({ file: f.originalname, reason: "image_limit_exceeded" });
+        continue;
+      }
+
       const base = safeName((f.originalname || "file").replace(/\.[^.]+$/, ""));
       const uniq = `${Date.now().toString(36)}_${crypto.randomBytes(3).toString("hex")}`;
 
@@ -157,7 +141,6 @@ router.post("/", upload.any(), async (req, res) => {
           await fs.rename(tmp, out);
           savedImages.push(toPublicPath(out));
         } catch {
-          // tek bir bozuk görsel tüm isteği düşürmesin
           skipped.push({ file: f.originalname, reason: "image_convert_failed" });
         }
         continue;
@@ -187,43 +170,40 @@ router.post("/", upload.any(), async (req, res) => {
       images: savedImages,
       status: "pending",
       termsAccepted: true,
-      folder: folderPublic, // modelin pre-save'ine gerek kalmadan doldur
+      folder: folderPublic,
     });
 
-    /* ---- Yanıt: klasör + önizleme URL’leri ---- */
+    /* ---- Yanıt: klasör + önizleme URL’leri + redirect bilgisi ---- */
     const base = getBaseUrl(req);
     const imagePreviews = savedImages.map(
       (p) => `${base}/api/img?src=${encodeURIComponent(p)}&w=800&dpr=2`
     );
     const docLinks = savedDocs.map((p) => `${base}${p}`);
 
+    const next = {
+      message: "Başvurun alındı, değerlendirilmeye alınmıştır.",
+      redirect: `${base}/`,          // ← SPA ana sayfa
+      redirectAfterMs: 1500          // ← Frontend isterse bu kadar sonra yönlendirsin
+    };
+    res.setHeader("X-Redirect", next.redirect);
+
     return res.status(201).json({
       ok: true,
       id: doc._id,
-      folder: folderPublic, // /uploads/apply/xxxx...
-      images: savedImages,  // /uploads/... (server.json middleware’i absolute’a çevirir)
-      docs: savedDocs,      // /uploads/...
-      preview: {
-        images: imagePreviews, // gösterime hazır URL’ler
-        docs: docLinks,        // tıklanabilir PDF linkleri
-      },
+      folder: folderPublic,
+      images: savedImages,
+      docs: savedDocs,
+      preview: { images: imagePreviews, docs: docLinks },
       counts: { images: savedImages.length, docs: savedDocs.length, skipped: skipped.length },
-      skipped, // {file, reason} listesi (UI'da istersen bilgilendir)
+      skipped,
+      next,                           // ← frontend için yönlendirme ipucu
     });
   } catch (err) {
     console.error("[apply] error:", err);
-    // Multer limit hataları
-    if (err?.code === "LIMIT_FILE_SIZE") {
-      return res.status(413).json({ ok: false, code: "FILE_TOO_LARGE" });
-    }
-    if (err?.code === "LIMIT_UNEXPECTED_FILE") {
-      return res.status(400).json({ ok: false, code: "UNEXPECTED_FILE" });
-    }
-
+    if (err?.code === "LIMIT_FILE_SIZE")  return res.status(413).json({ ok: false, code: "FILE_TOO_LARGE" });
+    if (err?.code === "LIMIT_UNEXPECTED_FILE") return res.status(400).json({ ok: false, code: "UNEXPECTED_FILE" });
     const msg = String(err?.message || "");
-    if (msg.includes("UNSUPPORTED_FILE_TYPE")) {
-      return res.status(415).json({ ok: false, code: "UNSUPPORTED_FILE_TYPE" });
-    }
+    if (msg.includes("UNSUPPORTED_FILE_TYPE")) return res.status(415).json({ ok: false, code: "UNSUPPORTED_FILE_TYPE" });
     return res.status(500).json({ ok: false, code: "INTERNAL_ERROR" });
   }
 });

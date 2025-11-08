@@ -13,29 +13,27 @@ const UserSchema = new mongoose.Schema(
   {
     name: { type: String, trim: true, maxlength: 120 },
 
-    // DİKKAT: Burada unique/index yok; tekil index aşağıda schema.index ile verilecek
     email: {
-      type: String,
-      required: true,
-      trim: true,
-      lowercase: true,
-      maxlength: 254,
-    },
+  type: String,
+  required: true,
+  trim: true,
+  lowercase: true,
+  maxlength: 254,
+  unique: true,   // ✅ ekle
+  index: true,    // ✅ ekle
+},
 
-    // Parola hassas: select:false
+    // NOT: select:false -> authenticate sırasında +password ile seçiyoruz
     password: { type: String, required: true, minlength: 6, select: false },
 
     role: { type: String, enum: ["admin", "user"], default: "user", index: true },
 
-    /* Hesap durumu */
     isVerified: { type: Boolean, default: false, index: true },
     lastLoginAt: { type: Date },
 
-    /* Brute-force koruması */
     loginAttempts: { type: Number, default: 0, select: false },
     lockedUntil: { type: Date, default: null, select: false },
 
-    /* Token alanları (gizli) */
     emailVerifyToken: { type: String, select: false },
     emailVerifyExpires: { type: Date, select: false },
     resetPasswordToken: { type: String, select: false },
@@ -50,14 +48,7 @@ const UserSchema = new mongoose.Schema(
   }
 );
 
-/* ========= Indexes (TEK YER) ========= */
-// Tekil e-posta index’i (boş/eksik olmayan kayıtlar için). Alan üzerinde unique yok!
-UserSchema.index(
-  { email: 1 },
-  { unique: true, partialFilterExpression: { email: { $exists: true, $ne: "" } } }
-);
 
-// Sık sorgular
 UserSchema.index({ isVerified: 1, role: 1, createdAt: -1 });
 
 /* ========= Hooks ========= */
@@ -71,7 +62,6 @@ UserSchema.pre("save", async function (next) {
   next();
 });
 
-// findOneAndUpdate ile güncellemelerde de e-posta normalize + parola hash
 UserSchema.pre("findOneAndUpdate", async function (next) {
   const upd = this.getUpdate() || {};
   const $set = { ...(upd.$set || {}) };
@@ -90,7 +80,10 @@ UserSchema.pre("findOneAndUpdate", async function (next) {
 
 /* ========= Methods / Statics ========= */
 UserSchema.methods.comparePassword = function (candidate) {
-  // Bu methodu çağırırken modeli select('+password') ile çektiğinden emin ol
+  if (!this.password) {
+    // Bu dokümanda password seçilmemiş olabilir (select:false)
+    return Promise.resolve(false);
+  }
   return bcrypt.compare(candidate, this.password);
 };
 
@@ -103,7 +96,7 @@ UserSchema.methods.markLoginSuccess = async function () {
 
 UserSchema.methods.markLoginFailure = async function (maxAttempts = 5, lockMinutes = 15) {
   const now = new Date();
-  if (this.lockedUntil && this.lockedUntil > now) return; // kilitliyse artırma
+  if (this.lockedUntil && this.lockedUntil > now) return;
 
   this.loginAttempts = (this.loginAttempts || 0) + 1;
   if (this.loginAttempts >= maxAttempts) {
@@ -113,12 +106,6 @@ UserSchema.methods.markLoginFailure = async function (maxAttempts = 5, lockMinut
   await this.save({ validateBeforeSave: false });
 };
 
-/**
- * Güvenli oturum açma akışı:
- * - Başarılıysa kullanıcı (parolasız) döndürür
- * - Başarısızsa null
- * - Kilitliyse { lockedUntil } döndürür
- */
 UserSchema.statics.authenticate = async function (email, password) {
   const user = await this.findOne({ email: String(email || "").toLowerCase().trim() })
     .select("+password +loginAttempts +lockedUntil");
@@ -137,7 +124,50 @@ UserSchema.statics.authenticate = async function (email, password) {
   }
 
   await user.markLoginSuccess();
-  return await this.findById(user._id); // parolasız döndür
+  // Dönerken gizli alanlar olmadan dönelim
+  return await this.findById(user._id);
+};
+
+/**
+ * Admin seed: Ortam değişkenlerinden admin kullanıcısı oluştur.
+ * - ADMIN_EMAIL zorunlu
+ * - ADMIN_PASSWORD_HASH varsa direkt kullan
+ * - Yoksa ADMIN_PASSWORD'ı COST ile hash'le
+ */
+UserSchema.statics.ensureAdminSeed = async function () {
+  const email = (process.env.ADMIN_EMAIL || "").trim().toLowerCase();
+  if (!email) return;
+
+  let user = await this.findOne({ email });
+  if (user) {
+    // varsa rolünü admin'e yükselt
+    if (user.role !== "admin") {
+      user.role = "admin";
+      await user.save({ validateBeforeSave: false });
+    }
+    return;
+  }
+
+  let passwordHash = process.env.ADMIN_PASSWORD_HASH || "";
+  if (!passwordHash && process.env.ADMIN_PASSWORD) {
+    const salt = await bcrypt.genSalt(COST);
+    passwordHash = await bcrypt.hash(process.env.ADMIN_PASSWORD, salt);
+  }
+
+  if (!passwordHash) {
+    console.warn("[User.ensureAdminSeed] ADMIN_PASSWORD_HASH veya ADMIN_PASSWORD tanımlı değil; admin oluşturulmadı.");
+    return;
+  }
+
+  await this.create({
+    email,
+    password: passwordHash, // pre('save') ikinci kez hashlemez çünkü set edilmiyor
+    role: "admin",
+    isVerified: true,
+    name: "Platform Admin",
+  });
+
+  console.log(`[User.ensureAdminSeed] Admin kullanıcı oluşturuldu: ${email}`);
 };
 
 /* ========= Output shaping ========= */
@@ -156,4 +186,5 @@ UserSchema.set("toJSON", {
   },
 });
 
-export default mongoose.models.User || mongoose.model("User", UserSchema);
+const User = mongoose.models.User || mongoose.model("User", UserSchema);
+export default User;

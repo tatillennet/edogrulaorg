@@ -16,6 +16,7 @@ const PageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-PageSchema.index({ slug: 1 });
+// unique:true zaten bir indeks oluşturduğu için bu satır gereksizdi ve kaldırıldı.
+// PageSchema.index({ slug: 1 });
 
 export default mongoose.model("Page", PageSchema);

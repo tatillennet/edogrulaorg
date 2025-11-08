@@ -161,7 +161,8 @@ export default function Apply() {
     website: "",
     phone: "",             // Mobil (zorunlu)
     landline: "",          // Sabit (opsiyonel)
-    address: "",
+    city: "",              // İl (zorunlu)
+    district: "",          // İlçe (zorunlu)
     note: "",
     terms: false,
   });
@@ -191,9 +192,9 @@ export default function Apply() {
   const pasteRef = useRef(null);
   const navigate = useNavigate();
   const location = useLocation();
-  const DRAFT_KEY = "applyDraft.v3"; // 🔄 yeni sürüm
+  const DRAFT_KEY = "applyDraft.v4"; // sürüm arttı (city/district)
 
-  /* ---------------- E-posta doğrulama kapısı (süreç aynı kalsın) ---------------- */
+  /* ---------------- E-posta doğrulama kapısı ---------------- */
   useEffect(() => {
     const token = localStorage.getItem("emailVerifyToken");
     const verified = localStorage.getItem("isVerifiedEmail");
@@ -219,12 +220,18 @@ export default function Apply() {
         "";
       const igUrl = b.instagramUrl || (igUser ? `https://instagram.com/${igUser}` : "") || "";
       const phone = prettyPhone(b.phone || (Array.isArray(b.phones) ? b.phones[0] : "") || "");
+
+      // Şehir/İlçe muhtemel alanları topla
+      const city = b.city || b.province || b.location?.city || b.addressCity || "";
+      const district = b.district || b.town || b.county || b.location?.district || b.addressDistrict || "";
+
       setForm((prev) => ({
         ...prev,
         name: b.name || prev.name,
         tradeTitle: b.tradeTitle || b.legalName || prev.tradeTitle || "",
         type: b.type || b.category || prev.type,
-        address: b.address || b.fullAddress || b.location?.address || prev.address,
+        city: city || prev.city,
+        district: district || prev.district,
         phone,
         instagramUsername: igUser ? `@${igUser}` : prev.instagramUsername,
         instagramUrl: igUrl || prev.instagramUrl,
@@ -318,11 +325,6 @@ export default function Apply() {
 
   /* ---------------- Öneriler ---------------- */
   const igSuggestion = useMemo(() => usernameFromUrl(form.instagramUrl), [form.instagramUrl]);
-  const phoneSuggestions = useMemo(() => {
-    const fromAddr = (form.address || "").match(PHONE_RE) || [];
-    const all = new Set(fromAddr.map(prettyPhone).concat(form.phone ? [prettyPhone(form.phone)] : []));
-    return [...all].filter(Boolean).slice(0, 3);
-  }, [form.address, form.phone]);
 
   /* ---------------- Validasyon ---------------- */
   const v = {
@@ -330,15 +332,16 @@ export default function Apply() {
     tradeTitle: (form.tradeTitle || "").trim().length >= 2,
     type: (form.type || "").trim().length >= 2,
     phone: digitsOnly(form.phone || "").length >= 10,
-    address: (form.address || "").trim().length >= 5,
+    city: (form.city || "").trim().length >= 2,
+    district: (form.district || "").trim().length >= 2,
     taxPdf: !!taxPdf,
     permitPdf: !!permitPdf,
-    images5: files.length === MAX_IMAGES, // tam 5 görsel
+    imagesOk: files.length > 0 && files.length <= MAX_IMAGES, // 1..5
     terms: !!form.terms,
   };
-  const canNext1 = v.name && v.tradeTitle && v.type && v.address;
-  const canNext2 = v.phone; // e-posta artık yok, sabit opsiyonel
-  const canSubmit = canNext1 && canNext2 && v.taxPdf && v.permitPdf && v.images5 && v.terms;
+  const canNext1 = v.name && v.tradeTitle && v.type && v.city && v.district;
+  const canNext2 = v.phone;
+  const canSubmit = canNext1 && canNext2 && v.taxPdf && v.permitPdf && v.imagesOk && v.terms;
 
   /* ---------------- Görsel girişleri ---------------- */
   async function addFiles(list) {
@@ -380,7 +383,7 @@ export default function Apply() {
     let merged = [...files, ...next];
     if (merged.length > MAX_IMAGES) {
       merged = merged.slice(0, MAX_IMAGES);
-      setUploadError(`Tam ${MAX_IMAGES} görsel gereklidir. Fazlası otomatik çıkarıldı.`);
+      setUploadError(`En fazla ${MAX_IMAGES} görsel kabul edilir. Fazlası otomatik çıkarıldı.`);
     } else if (rejectedTypeOrSize) {
       setUploadError("Sadece uygun boyutta görseller (JPG/WEBP, her biri 10MB'ı geçmemeli) kabul ediliyor.");
     }
@@ -448,11 +451,12 @@ export default function Apply() {
         if (!v.name) miss.push("İşletme Adı");
         if (!v.tradeTitle) miss.push("Ticari Ünvan");
         if (!v.type) miss.push("İşletme Türü");
-        if (!v.address) miss.push("Adres");
+        if (!v.city) miss.push("İl");
+        if (!v.district) miss.push("İlçe");
         if (!v.phone) miss.push("Telefon (mobil)");
         if (!v.taxPdf) miss.push("Vergi Levhası (PDF)");
         if (!v.permitPdf) miss.push("İşyeri Açma ve Çalıştırma Ruhsatı (PDF)");
-        if (!v.images5) miss.push("5 Adet Görsel");
+        if (!v.imagesOk) miss.push("1–5 Adet Görsel");
         if (!v.terms) miss.push("Koşullar Onayı");
         if (miss.length) msg += " " + miss.join(", ") + ".";
         setError(msg);
@@ -477,12 +481,12 @@ export default function Apply() {
       if (biz?._id) fd.append("business", biz._id);
 
       // Belgeler
-      fd.append("taxCertificate", taxPdf); // ✅ Vergi Levhası
-      fd.append("workPermit", permitPdf); // ✅ İşyeri Açma ve Çalıştırma Ruhsatı
+      fd.append("taxCertificate", taxPdf);
+      fd.append("workPermit", permitPdf);
 
       const notes = [];
       files.forEach((f, idx) => {
-        if (f.file) fd.append("documents", f.file); // görseller (backend alanı daha öncekiyle aynı)
+        if (f.file) fd.append("documents", f.file);
         notes.push({ index: idx, note: f.note || "", blur: !!f.blur, name: f.file?.name || f.name || "" });
       });
       fd.append("documentNotes", JSON.stringify(notes));
@@ -527,7 +531,8 @@ export default function Apply() {
         website: "",
         phone: "",
         landline: "",
-        address: "",
+        city: "",
+        district: "",
         note: "",
         terms: false,
       });
@@ -540,8 +545,8 @@ export default function Apply() {
       await sleep(300);
       setProgress(0);
 
-      const t = setTimeout(() => setShowPopup(false), 8000);
-      return () => clearTimeout(t);
+      // Otomatik ana sayfaya yönlendirme
+      setTimeout(() => navigate("/", { replace: true }), 1200);
     } catch (err) {
       const msg =
         err?.response?.data?.message ||
@@ -569,14 +574,19 @@ export default function Apply() {
         aria-label="Adım göstergesi"
       >
         <h2 style={{ margin: 0, color: "#111827", fontWeight: 800 }}>İşletme Doğrulama Başvurusu</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }} role="list" aria-label="Adımlar">
-          <div style={stepDot(step === 1, step > 1)} role="listitem" title="1. İşletme Bilgileri" />
-          <div style={{ width: 50, height: 2, background: step > 1 ? "#6b7280" : "#e5e7eb" }} />
-          <div style={stepDot(step === 2, step > 2)} role="listitem" title="2. İletişim & Sosyal" />
-          <div style={{ width: 50, height: 2, background: step > 2 ? "#6b7280" : "#e5e7eb" }} />
-          <div style={stepDot(step === 3, step > 3)} role="listitem" title="3. Belgeler & Galeri" />
-          <div style={{ width: 50, height: 2, background: step > 3 ? "#6b7280" : "#e5e7eb" }} />
-          <div style={stepDot(step === 4, false)} role="listitem" title="4. Gönder" />
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => navigate("/")} style={subtleBtn} title="Anasayfaya dön">
+            ⟵ Anasayfaya Dön
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }} role="list" aria-label="Adımlar">
+            <div style={stepDot(step === 1, step > 1)} role="listitem" title="1. İşletme Bilgileri" />
+            <div style={{ width: 50, height: 2, background: step > 1 ? "#6b7280" : "#e5e7eb" }} />
+            <div style={stepDot(step === 2, step > 2)} role="listitem" title="2. İletişim & Sosyal" />
+            <div style={{ width: 50, height: 2, background: step > 2 ? "#6b7280" : "#e5e7eb" }} />
+            <div style={stepDot(step === 3, step > 3)} role="listitem" title="3. Belgeler & Galeri" />
+            <div style={{ width: 50, height: 2, background: step > 3 ? "#6b7280" : "#e5e7eb" }} />
+            <div style={stepDot(step === 4, false)} role="listitem" title="4. Gönder" />
+          </div>
         </div>
       </div>
 
@@ -655,16 +665,29 @@ export default function Apply() {
                 aria-invalid={!v.type}
               />
             </div>
-            <div style={{ gridColumn: "1 / -1" }}>
-              <div style={label}>Adres *</div>
+
+            <div>
+              <div style={label}>İl *</div>
               <input
-                value={form.address}
-                onChange={(e) => setForm({ ...form, address: e.target.value })}
-                style={inputStyle(v.address)}
-                placeholder="Açık adres"
-                aria-invalid={!v.address}
+                value={form.city}
+                onChange={(e) => setForm({ ...form, city: e.target.value })}
+                style={inputStyle(v.city)}
+                placeholder="Örn: Sakarya"
+                aria-invalid={!v.city}
               />
             </div>
+
+            <div>
+              <div style={label}>İlçe *</div>
+              <input
+                value={form.district}
+                onChange={(e) => setForm({ ...form, district: e.target.value })}
+                style={inputStyle(v.district)}
+                placeholder="Örn: Serdivan"
+                aria-invalid={!v.district}
+              />
+            </div>
+
             <div style={{ gridColumn: "1 / -1" }}>
               <div style={label}>Başvuru Notu (opsiyonel)</div>
               <textarea
@@ -688,7 +711,8 @@ export default function Apply() {
                   website: "",
                   phone: "",
                   landline: "",
-                  address: "",
+                  city: "",
+                  district: "",
                   note: "",
                   terms: false,
                 });
@@ -722,20 +746,6 @@ export default function Apply() {
                 placeholder="0XXX XXX XX XX"
                 aria-invalid={!v.phone}
               />
-              {!!phoneSuggestions.length && (
-                <div>
-                  <div style={{ ...label, marginTop: 4 }}>Önerilen</div>
-                  {phoneSuggestions.map((p, i) => (
-                    <span
-                      key={i}
-                      style={{ ...chip, background: "#ecfdf5", borderColor: "#bbf7d0" }}
-                      onClick={() => setForm({ ...form, phone: prettyPhone(p) })}
-                    >
-                      {prettyPhone(p)}
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
 
             <div>
@@ -873,7 +883,7 @@ export default function Apply() {
               marginBottom: 12,
             }}
           >
-            <div style={{ fontWeight: 700, color: "#111827" }}>İşletme Görselleri (tam {MAX_IMAGES} adet)</div>
+            <div style={{ fontWeight: 700, color: "#111827" }}>İşletme Görselleri (en fazla {MAX_IMAGES} adet)</div>
             <div style={{ color: "#6b7280", fontSize: 13, marginTop: 4 }}>
               JPG/WEBP – <b>en fazla {MAX_IMAGES} görsel</b>, her biri maks 10MB
             </div>
@@ -896,7 +906,7 @@ export default function Apply() {
           {!!files.length && (
             <>
               <div style={{ marginBottom: 6, fontSize: 13, color: "#374151" }}>
-                Seçilen görseller: {files.length}/{MAX_IMAGES} {v.images5 ? "✓" : "(tam 5 adet gerekli)"}
+                Seçilen görseller: {files.length}/{MAX_IMAGES} {v.imagesOk ? "✓" : "(en az 1, en fazla 5 görsel)"}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(220px,1fr))", gap: 12 }}>
                 {files.map((item, idx) => {
@@ -1003,7 +1013,8 @@ export default function Apply() {
                   <b>İşletme:</b> {form.name || "-"} <br />
                   <b>Ticari Ünvan:</b> {form.tradeTitle || "-"} <br />
                   <b>Tür:</b> {form.type || "-"} <br />
-                  <b>Adres:</b> {form.address || "-"} <br />
+                  <b>İl:</b> {form.city || "-"} <br />
+                  <b>İlçe:</b> {form.district || "-"} <br />
                   <b>Telefon (mobil):</b> {form.phone || "-"} <br />
                   <b>Sabit:</b> {form.landline || "-"} <br />
                   <b>Instagram:</b> {form.instagramUsername || form.instagramUrl || "-"} <br />
@@ -1048,7 +1059,7 @@ export default function Apply() {
                 <ul style={{ margin: 0, paddingLeft: 18, color: "#374151", fontSize: 14 }}>
                   <li>Bilgiler doğru ve günceldir.</li>
                   <li>Vergi levhası ve ruhsat PDF olarak eklendi.</li>
-                  <li>İşletme görselleri <b>5 adet</b>tir.</li>
+                  <li>İşletme görselleri <b>en fazla 5 adet</b>tir (en az 1 görsel gereklidir).</li>
                   <li>Gizlilik ve kullanım şartlarını kabul ediyorum.</li>
                 </ul>
 
@@ -1079,7 +1090,7 @@ export default function Apply() {
                         background: "#f1f5f9",
                         borderRadius: 999,
                         overflow: "hidden",
-                        border: "1px solid #e5e7eb", // ✅ düzeltilen satır
+                        border: "1px solid #e5e7eb",
                       }}
                       aria-label="Yükleme ilerlemesi"
                     >

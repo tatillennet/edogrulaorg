@@ -23,7 +23,9 @@ const ArticleSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-ArticleSchema.index({ slug: 1 });
+// unique:true zaten bir indeks oluşturduğu için bu satır gereksizdi ve kaldırıldı.
+// ArticleSchema.index({ slug: 1 }); 
+
 ArticleSchema.index({ place: 1, pinned: 1, status: 1 });
 
 export default mongoose.model("Article", ArticleSchema);

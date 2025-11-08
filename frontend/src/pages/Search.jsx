@@ -9,7 +9,6 @@ import {
   FaWhatsapp,
   FaMagnifyingGlass,
   FaXmark,
-  FaRegPaste, // ⬅️ kopyala yerine yapıştır
   FaTag,
   FaPhone,
   FaGlobe,
@@ -114,7 +113,6 @@ export default function Search() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  const [toast, setToast] = useState("");
   const [offline, setOffline] = useState(!navigator.onLine);
 
   const controllerRef = useRef(null);
@@ -194,22 +192,6 @@ export default function Search() {
 
   const onKeyDown = (e) => e.key === "Enter" && doSearch();
 
-  const flash = (m) => {
-    setToast(m);
-    setTimeout(() => setToast(""), 1400);
-  };
-
-  // ⬇️ “Bağlantıyı kopyala” yerine PANODAN YAPIŞTIR
-  const pasteFromClipboard = async () => {
-    try {
-      const text = await navigator.clipboard.readText();
-      if (text) setQuery(text);
-      else flash("Panoda metin yok");
-    } catch {
-      flash("Pano erişimi reddedildi");
-    }
-  };
-
   return (
     <div style={styles.page}>
       <style>{globalCSS}</style>
@@ -231,7 +213,6 @@ export default function Search() {
             doSearch={doSearch}
             loading={loading}
             offline={offline}
-            onPasteClick={pasteFromClipboard}
           />
           <div style={styles.quickRow}>
             <button
@@ -247,12 +228,6 @@ export default function Search() {
       </main>
 
       <PageFooter />
-
-      {toast && (
-        <div style={styles.toast} className="glass" role="status">
-          {toast}
-        </div>
-      )}
 
       {showModal && (
         <ResultModal onClose={() => setShowModal(false)}>
@@ -285,7 +260,6 @@ const SearchBar = ({
   doSearch,
   loading,
   offline,
-  onPasteClick,
 }) => (
   <div style={styles.searchBarWrap} role="search" className="glass">
     <span className="lead-icon" aria-hidden>
@@ -293,39 +267,24 @@ const SearchBar = ({
     </span>
     <input
       value={query}
-      onChange={(e) => setQuery(e.target.value)} // ❗ otomatik '@' EKLEMİYORUZ
+      onChange={(e) => setQuery(e.target.value)}
       onKeyDown={onKeyDown}
       placeholder="Instagram kullanıcı adı, Instagram URL’si, telefon numarası veya web sitesi…"
       aria-label="Arama"
       style={styles.searchInput}
       inputMode="search"
     />
-    {!!query && (
-      <button
-        className="ghost icon"
-        aria-label="Temizle"
-        onClick={() => setQuery("")}
-        title="Temizle"
-      >
-        <FaXmark />
-      </button>
-    )}
-    <button
-      className="ghost icon"
-      onClick={onPasteClick}
-      title="Panodan yapıştır"
-      aria-label="Panodan yapıştır"
-    >
-      <FaRegPaste />
-    </button>
+    {/* X (temizle) ve kopyalama/yapıştırma butonları kaldırıldı */}
     <button
       className={`btn primary ${loading ? "loading" : ""}`}
       onClick={() => doSearch()}
       disabled={loading || offline}
       aria-busy={loading}
-      style={styles.searchBtn}
+      aria-label="Ara"
+      title="Ara"
+      style={styles.searchIconBtn}
     >
-      {loading ? <LoadingDots /> : "Sorgula"}
+      {loading ? <LoadingDots /> : <FaMagnifyingGlass />}
     </button>
   </div>
 );
@@ -376,8 +335,9 @@ const PageFooter = () => (
       <a className="foot" href="/hakkimizda">
         hakkımızda
       </a>
-      <a className="foot" href="/kariyer">
-        kariyer / iş birliği
+      {/* kariyer / iş birliği  -> SSS */}
+      <a className="foot" href="/sss">
+        sss
       </a>
     </div>
     <div style={styles.footerRight}>
@@ -709,6 +669,17 @@ const styles = {
     fontSize: 16, // ⬅️ iOS odak zoomunu engeller
     outline: "none",
     color: "var(--fg)",
+  },
+  // Eski metinli buton yerine yuvarlak ikon buton
+  searchIconBtn: {
+    width: 42,
+    height: 42,
+    padding: 0,
+    borderRadius: "50%",
+    border: "none",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
   },
   searchBtn: { height: 36, padding: "0 16px", borderRadius: 999, border: "none", fontWeight: 800 },
   howtoCard: {

@@ -1,159 +1,260 @@
+// backend/routes/admin.featured.js — Pro (esnek create + reorder + public list)
 import express from "express";
-import Featured from "../models/Featured.js";
+import mongoose from "mongoose";
 import Business from "../models/Business.js";
 
-const DEFAULT_IMG = "/defaults/edogrula-default.webp.png";
+// Featured modeli: varsa kullan, yoksa güvenli şekilde tanımla
+const Featured =
+  mongoose.models.Featured ||
+  mongoose.model(
+    "Featured",
+    new mongoose.Schema(
+      {
+        title: { type: String, required: true, trim: true },
+        subtitle: { type: String, trim: true },
+        placement: { type: String, default: "home", index: true }, // home|category|search|custom
+        order: { type: Number, default: 1, index: true },
+        status: {
+          type: String,
+          enum: ["active", "draft", "scheduled", "expired", "archived"],
+          default: "draft",
+          index: true,
+        },
+        startAt: { type: Date },
+        endAt: { type: Date },
 
-/* ------------ helpers ------------- */
-function normalizeBusiness(b) {
-  if (!b) return null;
-  const photo = (Array.isArray(b.gallery) && b.gallery[0]) || b.photo || DEFAULT_IMG;
+        // İşletme bağları
+        businessId: { type: mongoose.Schema.Types.ObjectId, ref: "Business", index: true },
+        businessSlug: { type: String, index: true },
+        businessName: { type: String },
+
+        // Vitrin görseli & link
+        imageUrl: { type: String },
+        href: { type: String },
+      },
+      { timestamps: true, collection: "featureds" }
+    )
+  );
+
+const adminFeaturedRouter = express.Router();
+const publicFeaturedRouter = express.Router();
+
+/* ---------------- utils ---------------- */
+function parseListParams(req, { defLimit = 20, maxLimit = 200 } = {}) {
+  const limit = Math.max(1, Math.min(+req.query.limit || defLimit, maxLimit));
+  const page = Math.max(1, +req.query.page || 1);
+  const skip = (page - 1) * limit;
+
+  const sort = {};
+  const sortParam = String(req.query.sort || "order,-createdAt");
+  for (const part of sortParam.split(",").map((s) => s.trim()).filter(Boolean)) {
+    if (part.startsWith("-")) sort[part.slice(1)] = -1;
+    else sort[part] = 1;
+  }
+  const dateFilter = {};
+  const from = req.query.from ? new Date(req.query.from) : null;
+  const to = req.query.to ? new Date(req.query.to) : null;
+  if (from || to) {
+    dateFilter.createdAt = {};
+    if (from && !isNaN(from)) dateFilter.createdAt.$gte = from;
+    if (to && !isNaN(to)) dateFilter.createdAt.$lte = to;
+  }
+  return { limit, page, skip, sort, dateFilter };
+}
+
+function pickImage(b) {
+  return (
+    b?.coverImage ||
+    b?.coverUrl ||
+    b?.imageUrl ||
+    (Array.isArray(b?.images) && (b.images[0]?.url || b.images[0])) ||
+    (Array.isArray(b?.photos) && (b.photos[0]?.url || b.photos[0])) ||
+    (Array.isArray(b?.gallery) && b.gallery[0]) ||
+    ""
+  );
+}
+
+async function hydrateFromBusiness(payload) {
+  if (!payload.businessId) return payload;
+  const b = await Business.findById(payload.businessId).lean();
+  if (!b) return payload;
   return {
-    _id: b._id,
-    id: b._id,
-    slug: b.slug || b._id?.toString(),
-    name: b.name || "İsimsiz İşletme",
-    address: b.address || "",
-    verified: !!b.verified,
-    type: b.type || "",
-    photo,
-    rating: Number(b.rating ?? 0),
-    reviewsCount: Number(b.reviewsCount ?? 0),
-    googleRating: Number(b.googleRating ?? b.google_rate ?? b.google?.rating ?? 0),
-    googleReviewsCount: Number(b.googleReviewsCount ?? b.google_reviews ?? b.google?.reviewsCount ?? 0),
-    instagramUsername: b.instagramUsername || b.handle || "",
-    instagramUrl: b.instagramUrl || "",
-    phone: b.phone || "",
+    ...payload,
+    businessSlug: payload.businessSlug || b.slug || "",
+    businessName: payload.businessName || b.name || "",
+    imageUrl: payload.imageUrl || pickImage(b),
   };
 }
 
-/* ============== PUBLIC: /api/featured ============== */
-const publicFeaturedRouter = express.Router();
-
-/** GET /api/featured?place=Sapanca&type=bungalov&limit=8 */
-publicFeaturedRouter.get("/", async (req, res) => {
-  try {
-    const place = String(req.query.place || "").trim();
-    const type  = String(req.query.type  || "").trim();
-    const limit = Math.max(1, Math.min(20, parseInt(req.query.limit || "8", 10)));
-    const now = new Date();
-
-    const q = { active: true };
-    if (place) q.place = new RegExp(place, "i");
-    if (type)  q.type  = new RegExp(type, "i");
-    q.$and = [
-      { $or: [{ startAt: { $exists: false } }, { startAt: null }, { startAt: { $lte: now } }] },
-      { $or: [{ endAt: { $exists: false } }, { endAt: null }, { endAt: { $gte: now } }] },
-    ];
-
-    const feats = await Featured.find(q)
-      .sort({ order: 1, createdAt: -1 })
-      .limit(limit)
-      .populate({
-        path: "business",
-        select:
-          "name slug address verified photo gallery rating reviewsCount googleRating googleReviewsCount type instagramUsername handle instagramUrl phone",
-      })
-      .lean();
-
-    let items = feats.map((f) => normalizeBusiness(f.business)).filter(Boolean);
-
-    // fallback: hiç featured yoksa en iyi işletmeler
-    if (items.length === 0) {
-      const qb = {};
-      if (place) qb.address = { $regex: place, $options: "i" };
-      if (type)  qb.type    = { $regex: type,  $options: "i" };
-      const top = await Business.find(qb)
-        .sort({ rating: -1, reviewsCount: -1, googleRating: -1, createdAt: -1 })
-        .limit(limit)
-        .lean();
-      items = top.map(normalizeBusiness).filter(Boolean);
-    }
-
-    return res.json({ success: true, items });
-  } catch (e) {
-    console.error("featured public error:", e);
-    return res.status(500).json({ success: false, message: "FEATURED_PUBLIC_ERROR" });
-  }
-});
-
-/* ============== ADMIN: /api/admin/featured ============== */
-const adminFeaturedRouter = express.Router();
-
-/** GET /api/admin/featured?place=&type= */
+/* ---------------- Admin: list ---------------- */
 adminFeaturedRouter.get("/", async (req, res) => {
   try {
-    const place = String(req.query.place || "").trim();
-    const type  = String(req.query.type  || "").trim();
-    const q = {};
-    if (place) q.place = new RegExp(place, "i");
-    if (type)  q.type  = new RegExp(type, "i");
+    const { limit, page, skip, sort, dateFilter } = parseListParams(req);
+    const filter = { ...dateFilter };
 
-    const rows = await Featured.find(q)
-      .sort({ place: 1, type: 1, order: 1, createdAt: -1 })
-      .populate({ path: "business", select: "name slug address verified photo gallery type" })
-      .lean();
+    if (req.query.q) {
+      const q = String(req.query.q).trim();
+      const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      filter.$or = [
+        { title: rx },
+        { subtitle: rx },
+        { businessName: rx },
+        { businessSlug: rx },
+        { href: rx },
+      ];
+    }
+    if (typeof req.query.status === "string" && req.query.status !== "all") {
+      filter.status = req.query.status;
+    }
+    if (typeof req.query.placement === "string" && req.query.placement !== "all") {
+      filter.placement = req.query.placement;
+    }
 
-    return res.json({ success: true, items: rows });
+    const [items, total] = await Promise.all([
+      Featured.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+      Featured.countDocuments(filter),
+    ]);
+
+    res.json({
+      success: true,
+      featured: items,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      limit,
+    });
   } catch (e) {
-    console.error("featured admin list error:", e);
-    return res.status(500).json({ success: false, message: "FEATURED_LIST_ERROR" });
+    console.error("admin featured list error:", e);
+    res.status(500).json({ success: false, message: "Sunucu hatası" });
   }
 });
 
-/** POST /api/admin/featured  body: { businessId, place, type, order?, active?, startAt?, endAt? } */
+/* ---------------- Admin: create (esnek) ---------------- */
 adminFeaturedRouter.post("/", async (req, res) => {
   try {
-    const { businessId, place, type, order = 0, active = true, startAt = null, endAt = null } = req.body || {};
-    if (!businessId || !place || !type)
-      return res.status(400).json({ success: false, message: "businessId, place, type zorunlu" });
+    let payload = { ...req.body };
 
-    const biz = await Business.findById(businessId).lean();
-    if (!biz) return res.status(404).json({ success: false, message: "İşletme bulunamadı" });
-
-    const doc = await Featured.findOneAndUpdate(
-      { business: businessId, place, type },
-      { $set: { business: businessId, place, type, order, active, startAt, endAt } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    );
-
-    return res.json({ success: true, item: doc });
-  } catch (e) {
-    console.error("featured admin create error:", e);
-    const msg = e?.code === 11000 ? "Aynı kayıt zaten var." : "FEATURED_CREATE_ERROR";
-    return res.status(500).json({ success: false, message: msg });
-  }
-});
-
-/** PUT /api/admin/featured/:id */
-adminFeaturedRouter.put("/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const patch = {};
-    for (const k of ["place", "type", "order", "active", "startAt", "endAt"]) {
-      if (k in req.body) patch[k] = req.body[k];
+    // Minimum doğrulama: title zorunlu
+    if (!payload.title || String(payload.title).trim().length < 2) {
+      return res.status(400).json({ success: false, message: "title gerekli" });
     }
-    if ("businessId" in req.body) patch.business = req.body.businessId;
 
-    const doc = await Featured.findByIdAndUpdate(id, { $set: patch }, { new: true });
-    if (!doc) return res.status(404).json({ success: false, message: "Kayıt bulunamadı" });
-    return res.json({ success: true, item: doc });
+    // İşletme varsa bilgileri doldur
+    payload = await hydrateFromBusiness(payload);
+
+    // Sıra yoksa otomatik ver
+    if (typeof payload.order !== "number") {
+      const max = await Featured.findOne({}, { order: 1 }).sort({ order: -1 }).lean();
+      payload.order = (max?.order || 0) + 1;
+    }
+
+    // Varsayılanlar
+    payload.placement = payload.placement || "home";
+    payload.status = payload.status || "draft";
+
+    const doc = await Featured.create(payload);
+    res.status(201).json({ success: true, item: doc });
   } catch (e) {
-    console.error("featured admin update error:", e);
-    return res.status(500).json({ success: false, message: "FEATURED_UPDATE_ERROR" });
+    console.error("admin featured create error:", e);
+    res.status(500).json({ success: false, message: "Kaydedilemedi" });
   }
 });
 
-/** DELETE /api/admin/featured/:id */
+/* ---------------- Admin: update ---------------- */
+adminFeaturedRouter.patch("/:id", async (req, res) => {
+  try {
+    const id = req.params.id;
+    let patch = { ...req.body };
+
+    // İşletme değişirse yeniden doldur
+    if (patch.businessId) patch = await hydrateFromBusiness(patch);
+
+    const updated = await Featured.findByIdAndUpdate(id, patch, { new: true });
+    if (!updated) return res.status(404).json({ success: false, message: "Bulunamadı" });
+    res.json({ success: true, item: updated });
+  } catch (e) {
+    console.error("admin featured patch error:", e);
+    res.status(500).json({ success: false, message: "Güncellenemedi" });
+  }
+});
+
+/* ---------------- Admin: delete ---------------- */
 adminFeaturedRouter.delete("/:id", async (req, res) => {
   try {
-    const { id } = req.params;
-    const r = await Featured.findByIdAndDelete(id);
-    if (!r) return res.status(404).json({ success: false, message: "Kayıt bulunamadı" });
-    return res.json({ success: true, removed: true });
+    const id = req.params.id;
+    await Featured.findByIdAndDelete(id);
+    res.json({ success: true });
   } catch (e) {
-    console.error("featured admin delete error:", e);
-    return res.status(500).json({ success: false, message: "FEATURED_DELETE_ERROR" });
+    console.error("admin featured delete error:", e);
+    res.status(500).json({ success: false, message: "Silinemedi" });
+  }
+});
+
+/* ---------------- Admin: bulk ops ---------------- */
+adminFeaturedRouter.post("/bulk", async (req, res) => {
+  try {
+    const ids = (req.body.ids || []).map((x) => new mongoose.Types.ObjectId(String(x)));
+    if (!ids.length) return res.json({ success: true, updated: 0 });
+
+    if (req.body.op === "status") {
+      const value = String(req.body.value || "draft");
+      const r = await Featured.updateMany({ _id: { $in: ids } }, { $set: { status: value } });
+      return res.json({ success: true, updated: r.modifiedCount || 0 });
+    }
+    if (req.body.op === "delete") {
+      const r = await Featured.deleteMany({ _id: { $in: ids } });
+      return res.json({ success: true, deleted: r.deletedCount || 0 });
+    }
+    res.status(400).json({ success: false, message: "Geçersiz işlem" });
+  } catch (e) {
+    console.error("admin featured bulk error:", e);
+    res.status(500).json({ success: false, message: "Bulk işlem hatası" });
+  }
+});
+
+/* ---------------- Admin: reorder ---------------- */
+adminFeaturedRouter.post("/reorder", async (req, res) => {
+  try {
+    const items = Array.isArray(req.body.items) ? req.body.items : [];
+    for (const it of items) {
+      if (!it?.id) continue;
+      await Featured.findByIdAndUpdate(it.id, { $set: { order: Number(it.order || 0) } });
+    }
+    res.json({ success: true });
+  } catch (e) {
+    console.error("admin featured reorder error:", e);
+    res.status(500).json({ success: false, message: "Sıra kaydedilemedi" });
+  }
+});
+
+/* ---------------- Public: list (aktif) ---------------- */
+publicFeaturedRouter.get("/", async (req, res) => {
+  try {
+    const filter = { status: "active" };
+    if (req.query.placement) filter.placement = req.query.placement;
+    const rows = await Featured.find(filter).sort({ order: 1, createdAt: -1 }).lean();
+    res.json({ success: true, items: rows });
+  } catch (e) {
+    console.error("public featured list error:", e);
+    res.status(500).json({ success: false, message: "Sunucu hatası" });
+  }
+});
+
+/* ---------------- Public: CSV ---------------- */
+publicFeaturedRouter.get("/export.csv", async (req, res) => {
+  try {
+    const rows = await Featured.find({}).sort({ order: 1, createdAt: -1 }).lean();
+    const keys = [
+      "title","subtitle","placement","order","status","startAt","endAt",
+      "businessId","businessSlug","businessName","imageUrl","href","createdAt"
+    ];
+    const esc = (v) => `"${(v == null ? "" : String(v)).replace(/\"/g, '\"\"')}"`;
+    const body = rows.map(r => keys.map(k => esc(r[k])).join(";")).join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", "attachment; filename=featured.csv");
+    res.send("\uFEFF" + keys.join(";") + "\n" + body + "\n");
+  } catch (e) {
+    res.status(500).json({ success: false });
   }
 });
 

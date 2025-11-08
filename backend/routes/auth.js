@@ -1,330 +1,339 @@
-// backend/routes/auth.js (ESM)
+// backend/routes/auth.js
 import express from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import crypto from "crypto";
 import nodemailer from "nodemailer";
+
 import User from "../models/User.js";
 import VerificationCode from "../models/VerificationCode.js";
+import { authenticate } from "../middleware/auth.js";
 
 const router = express.Router();
 
-/* ------------------------------ Helpers ------------------------------ */
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
-const normalizeEmail = (e = "") => String(e).trim().toLowerCase();
-
+/* ------------ Config ------------ */
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
-const VERIFY_TOKEN_TTL = process.env.VERIFY_TOKEN_TTL || "24h"; // 24 saat
-const CODE_TTL_MIN = Number(process.env.CODE_TTL_MIN || 5);     // 5 dk
-const RESEND_SECONDS = Number(process.env.AUTH_RESEND_SECONDS || 45);
-const MAX_VERIFY_ATTEMPTS = Number(process.env.AUTH_MAX_ATTEMPTS || 5);
-const VERIFY_PURPOSE = "verify_email";
 const isProd = process.env.NODE_ENV === "production";
 
-// 🍪 Cookie ayarları
+/* ------------ Cookie opts ------------ */
 const COOKIE_NAME = "token";
 const COOKIE_OPTS = {
   httpOnly: true,
   secure: isProd,
   sameSite: isProd ? "none" : "lax",
   path: "/",
-  maxAge: 7 * 24 * 60 * 60 * 1000,
+  maxAge: 7 * 24 * 60 * 60 * 1000, // 7 gün
 };
 
-// Basit in-memory rate limit (prod'da Redis önerilir)
-const WINDOW_MS = Number(process.env.AUTH_WINDOW_MS || 60_000);
-const SEND_LIMIT = Number(process.env.AUTH_SEND_LIMIT || 5);
-const VERIFY_LIMIT = Number(process.env.AUTH_VERIFY_LIMIT || 10);
-const hitsSend = new Map();
-const hitsVerify = new Map();
+/* ------------ Helpers ------------ */
+const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
+const genCode = () => String(Math.floor(100000 + Math.random() * 900000));
+const signEmailVerifyToken = (email) =>
+  jwt.sign({ sub: "email-verify", email }, JWT_SECRET, { expiresIn: "10m" }); // 10 dk
 
-function allowHit(map, key, limit, windowMs) {
-  const now = Date.now();
-  const rec = map.get(key);
-  if (!rec || now - rec.ts > windowMs) {
-    map.set(key, { count: 1, ts: now });
-    return true;
-  }
-  if (rec.count < limit) {
-    rec.count += 1;
-    return true;
-  }
-  return false;
-}
-
-function maskedEmail(e) {
-  const [u = "", d = ""] = String(e).split("@");
-  if (!u || !d) return e;
-  const m = u.length <= 2 ? u[0] + "*" : u[0] + "*".repeat(u.length - 2) + u[u.length - 1];
-  return `${m}@${d}`;
-}
-
-/* ----------------------- Mail Transporter (sağlam) ---------------------- */
-let _transporter = null;
-
-async function createConfiguredTransport() {
-  if (process.env.MAIL_HOST && process.env.MAIL_USER && process.env.MAIL_PASS) {
-    const t = nodemailer.createTransport({
-      host: process.env.MAIL_HOST,
-      port: Number(process.env.MAIL_PORT || 465),
-      secure: String(process.env.MAIL_SECURE || "true") === "true",
-      auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS },
-      connectionTimeout: 10_000,
-      socketTimeout: 10_000,
-    });
-    await t.verify();
-    return t;
-  }
-  if (process.env.MAIL_USER && /gmail\.com$/i.test(process.env.MAIL_USER) && process.env.MAIL_PASS) {
-    const t = nodemailer.createTransport({
-      service: "gmail",
-      auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS },
-      connectionTimeout: 10_000,
-      socketTimeout: 10_000,
-    });
-    await t.verify();
-    return t;
-  }
-  const testAcc = await nodemailer.createTestAccount();
-  const t = nodemailer.createTransport({
-    host: testAcc.smtp.host,
-    port: testAcc.smtp.port,
-    secure: testAcc.smtp.secure,
-    auth: { user: testAcc.user, pass: testAcc.pass },
+function buildTransporter() {
+  const { MAIL_HOST, MAIL_PORT, MAIL_USER, MAIL_PASS, MAIL_SECURE } = process.env;
+  if (!MAIL_HOST || !MAIL_PORT || !MAIL_USER || !MAIL_PASS) return null;
+  return nodemailer.createTransport({
+    host: MAIL_HOST,
+    port: Number(MAIL_PORT),
+    secure: String(MAIL_SECURE || "").toLowerCase() === "true",
+    auth: { user: MAIL_USER, pass: MAIL_PASS },
   });
-  await t.verify();
-  console.warn("⚠️  Using Ethereal test SMTP. Preview emails at: https://ethereal.email/");
-  return t;
 }
+const mailFrom = process.env.MAIL_FROM || "E-Doğrula <noreply@edogrula.org>";
 
-async function getTransporter() {
-  if (_transporter) return _transporter;
+/* =========================================
+ * GET /api/auth/ping
+ * =======================================*/
+router.get("/ping", (_req, res) => {
+  res.json({ ok: true, where: "auth" });
+});
+
+/* =========================================
+ * (DEV ONLY) Mini debug uçları — işin bitince kaldırabilirsin
+ * =======================================*/
+router.get("/_dev/peek-code", async (req, res) => {
+  if (isProd) return res.status(404).end();
+  const email = String(req.query.email || "").toLowerCase().trim();
+  const doc = await VerificationCode.findOne({ email })
+    .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+    .lean();
+  if (!doc) return res.json({ ok: false, found: false });
+  res.json({
+    ok: true,
+    found: true,
+    email: doc.email,
+    hasCodeHash: !!doc.codeHash,
+    hasCodePlain: !!doc.code,
+    has_codeHash: !!doc._codeHash,
+    has_codePlain: !!doc._code,
+    expiresAt: doc.expiresAt,
+    updatedAt: doc.updatedAt,
+    attempts: doc.attempts,
+  });
+});
+
+router.post("/_dev/test-verify", async (req, res) => {
+  if (isProd) return res.status(404).end();
+  const email = String(req.body?.email || "").toLowerCase().trim();
+  const code = String(req.body?.code || "").trim();
+  const doc = await VerificationCode.findOne({ email })
+    .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+    .lean();
+  if (!doc) return res.json({ ok: false, reason: "CODE_NOT_FOUND" });
+  const expired = doc.expiresAt && new Date(doc.expiresAt) < new Date();
+  let matches = false;
+  if (doc.codeHash) matches = await bcrypt.compare(code, doc.codeHash);
+  else if (doc._codeHash) matches = await bcrypt.compare(code, doc._codeHash);
+  else if (doc.code) matches = String(doc.code) === code;
+  else if (doc._code) matches = String(doc._code) === code;
+  res.json({
+    ok: true,
+    expired,
+    matches,
+    hasCodeHash: !!doc.codeHash,
+    hasCodePlain: !!doc.code,
+    has_codeHash: !!doc._codeHash,
+    has_codePlain: !!doc._code,
+    updatedAt: doc.updatedAt,
+  });
+});
+
+/* =========================================
+ * POST /api/auth/send-code
+ * Body: { email }
+ * DEV:  ?force=1  → throttle bypass
+ *       ?clean=1  → aynı e-posta için eski kayıtları sil
+ * DEV cevabı: devCode içerir (prod'da içermez)
+ * =======================================*/
+router.post("/send-code", async (req, res, next) => {
   try {
-    _transporter = await createConfiguredTransport();
-  } catch (e) {
-    if (!isProd) {
-      console.warn("✋ Primary SMTP verify failed:", e?.message || e);
-      const testAcc = await nodemailer.createTestAccount();
-      _transporter = nodemailer.createTransport({
-        host: testAcc.smtp.host,
-        port: testAcc.smtp.port,
-        secure: testAcc.smtp.secure,
-        auth: { user: testAcc.user, pass: testAcc.pass },
-      });
-      await _transporter.verify();
-      console.warn("ℹ️ Dev fallback: Ethereal SMTP aktif.");
-    } else {
-      throw e;
-    }
-  }
-  return _transporter;
-}
-
-function buildEmailHTML(code) {
-  return `
-  <div style="font-family:Inter,Segoe UI,Arial,sans-serif;line-height:1.6;color:#111827">
-    <h2 style="margin:0 0 6px 0;color:#111827">E-Doğrula</h2>
-    <p style="margin:0 0 8px 0">E-posta doğrulama kodunuz:</p>
-    <div style="font-size:28px;font-weight:900;letter-spacing:2px;color:#fb415c">${code}</div>
-    <p style="margin:8px 0 0 0;color:#6b7280">Bu kod <b>${CODE_TTL_MIN} dakika</b> boyunca geçerlidir.</p>
-  </div>`;
-}
-
-/* ------------------------------ 📩 Kod Gönder ------------------------------ */
-router.post("/send-code", async (req, res) => {
-  try {
-    const ip = req.ip || req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown";
-    const ua = req.headers["user-agent"];
-    const rawEmail = req.body?.email;
-    const email = normalizeEmail(rawEmail);
-
-    if (!email || !EMAIL_RE.test(email)) {
-      return res.status(400).json({ success: false, message: "Geçerli bir e-posta girin" });
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, message: "Geçersiz e-posta" });
     }
 
-    if (!allowHit(hitsSend, `ip:${ip}`, SEND_LIMIT, WINDOW_MS) ||
-        !allowHit(hitsSend, `email:${email}`, SEND_LIMIT, WINDOW_MS)) {
-      return res.status(429).json({ success: false, message: "Çok fazla istek. Lütfen biraz sonra tekrar deneyin." });
-    }
+    // DEV/test parametreleri
+    const force =
+      !isProd &&
+      (String(req.query?.force || "").trim() === "1" || String(req.query?.f || "").trim() === "1");
+    const clean = !isProd && String(req.query?.clean || "").trim() === "1";
+    if (clean) await VerificationCode.deleteMany({ email });
 
-    // RESEND throttle
-    const last = await VerificationCode.findOne({ email, purpose: "verify_email", usedAt: null })
-      .sort({ createdAt: -1 })
-      .lean();
-    if (last?.createdAt) {
-      const ageSec = Math.floor((Date.now() - new Date(last.createdAt).getTime()) / 1000);
-      if (ageSec < RESEND_SECONDS) {
-        const remain = Math.max(1, RESEND_SECONDS - ageSec);
-        return res.json({
-          success: true,
-          message: `Kod daha önce gönderildi. Lütfen ${remain} sn sonra tekrar deneyin.`,
-          alreadySent: true,
-        });
+    // 45 sn throttle (force değilse)
+    if (!force) {
+      const existing = await VerificationCode.findOne({ email })
+        .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+        .lean();
+      const updatedAt = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      if (updatedAt && Date.now() - updatedAt < 45 * 1000) {
+        return res.status(429).json({ success: false, message: "TOO_SOON" });
       }
     }
 
-    // Yeni kod üret (hash DB'ye yazılır, ham kod burada döner)
-    const { code, ttlSeconds } = await VerificationCode.issue({
-      email,
-      purpose: "verify_email",
-      ttlSeconds: CODE_TTL_MIN * 60,
-      meta: { ip, ua, fp: req.body?.fp },
-    });
+    const code = genCode();
+    const codeHash = await bcrypt.hash(code, 10);
 
-    // Mail gönder
-    const transporter = await getTransporter();
-    const fromAddr = process.env.MAIL_FROM || (process.env.MAIL_USER ? `"E-Doğrula" <${process.env.MAIL_USER}>` : undefined);
+    // Şemaya uyan alanları *ve* fallback alanları hazırla
+    const payload = {
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 dk
+      attempts: 0,
+      // fallback alanlar (strict şemada da yazılabilsin)
+      _codeHash: codeHash,
+      ...(isProd ? {} : { _code: code }),
+    };
+    if (VerificationCode?.schema?.path?.("codeHash")) payload.codeHash = codeHash;
+    if (VerificationCode?.schema?.path?.("code")) payload.code = code;
 
-    let info;
-    try {
-      info = await transporter.sendMail({
-        from: fromAddr,
-        to: email,
-        subject: "E-Doğrula - E-posta Doğrulama Kodunuz",
-        html: buildEmailHTML(code),
-        text: `E-Doğrula doğrulama kodunuz: ${code} (${Math.round(ttlSeconds / 60)} dakika geçerlidir)`,
-      });
-    } catch (sendErr) {
-      console.error("✉️  sendMail error:", {
-        message: sendErr?.message,
-        code: sendErr?.code,
-        command: sendErr?.command,
-        response: sendErr?.response,
-      });
-      return res.status(502).json({ success: false, message: "E-posta gönderilemedi. Lütfen daha sonra tekrar deneyin." });
+    // strict:false ile yaz → şemada olmasa bile _code/_codeHash kaydolur
+    await VerificationCode.updateOne(
+      { email },
+      { $set: payload, $setOnInsert: { email }, $currentDate: { updatedAt: true } },
+      { upsert: true, strict: false }
+    );
+
+    // Mail gönder (SMTP varsa). DEV'de yanıta devCode ekleyelim.
+    const tx = buildTransporter();
+    if (tx) {
+      const html = `
+        <div style="font-family:Arial,sans-serif;font-size:16px">
+          <p>Merhaba,</p>
+          <p>E-Doğrula doğrulama kodunuz:</p>
+          <p style="font-size:24px;letter-spacing:3px"><b>${code}</b></p>
+          <p>Bu kod <b>10 dakika</b> içinde geçerlidir.</p>
+        </div>`;
+      try {
+        await tx.sendMail({ from: mailFrom, to: email, subject: "E-Doğrula — Doğrulama Kodunuz", html });
+        const resp = { success: true, message: "Kod gönderildi" };
+        if (!isProd) resp.devCode = code; // sadece dev ortamında göster
+        return res.json(resp);
+      } catch (mailErr) {
+        // SMTP hatası: dev'de yine de devCode dön; prod'da hata ver
+        if (!isProd) {
+          console.warn("[auth][send-code] SMTP hata (dev'de devCode ile devam):", mailErr?.message);
+          return res.json({ success: true, message: "Kod üretildi (DEV)", devCode: code });
+        }
+        return res.status(500).json({ success: false, message: "MAIL_SEND_FAILED" });
+      }
+    } else {
+      // SMTP yok → DEV
+      console.log(`[auth][DEV] send-code -> ${email} : ${code}`);
+      return res.json({ success: true, message: "Kod üretildi (DEV)", devCode: code });
     }
-
-    // Dev/Ethereal önizleme
-    let preview;
-    if (!isProd && nodemailer.getTestMessageUrl && info) {
-      preview = nodemailer.getTestMessageUrl(info);
-      if (preview) console.log("✉️  Preview:", preview);
-    }
-
-    return res.json({
-      success: true,
-      message: `Kod ${maskedEmail(email)} adresine gönderildi`,
-      ...(preview ? { preview } : {}),
-    });
   } catch (err) {
-    console.error("❌ Send Code Error:", err);
-    return res.status(500).json({ success: false, message: "Kod gönderilemedi" });
+    next(err);
   }
 });
 
-/* ------------------------------ ✅ Kod Doğrula ------------------------------ */
-router.post("/verify-code", async (req, res) => {
+/* =========================================
+ * POST /api/auth/verify-code
+ * Body: { email, code }
+ * Returns: { success, emailVerifyToken, expiresIn }
+ * Notlar:
+ *  - En yeni kayıt alınır (updatedAt, createdAt, _id DESC)
+ *  - Başarısızda attempts++ (tüm kayıtlar)
+ *  - Başarıda ilgili e-postanın tüm kayıtları silinir
+ * =======================================*/
+router.post("/verify-code", async (req, res, next) => {
   try {
-    const email = normalizeEmail(req.body?.email);
+    const email = String(req.body?.email || "").trim().toLowerCase();
     const code = String(req.body?.code || "").trim();
 
-    if (!email || !EMAIL_RE.test(email) || !/^\d{6}$/.test(code)) {
-      return res.status(400).json({ success: false, message: "Geçersiz e-posta veya kod" });
+    if (!emailRegex.test(email) || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: "Geçersiz giriş" });
     }
 
-    if (!allowHit(hitsVerify, `ip:${req.ip}`, VERIFY_LIMIT, WINDOW_MS) ||
-        !allowHit(hitsVerify, `email:${email}`, VERIFY_LIMIT, WINDOW_MS)) {
-      return res.status(429).json({ success: false, message: "Çok fazla deneme. Lütfen biraz sonra tekrar deneyin." });
+    // En yeni kaydı al (lean → şemada olmayan alanlar da gelsin)
+    const doc = await VerificationCode.findOne({ email })
+      .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
+      .lean();
+    if (!doc) return res.status(400).json({ success: false, message: "CODE_NOT_FOUND" });
+    if (doc.expiresAt && new Date(doc.expiresAt) < new Date()) {
+      return res.status(400).json({ success: false, message: "CODE_EXPIRED" });
     }
 
-    const out = await VerificationCode.verify({
-      email,
-      purpose: "verify_email",
-      code,
-      maxAttempts: MAX_VERIFY_ATTEMPTS,
-    });
+    // Doğrulama sırası: codeHash → _codeHash → code → _code
+    let ok = false;
+    if (doc.codeHash) ok = await bcrypt.compare(code, doc.codeHash);
+    else if (doc._codeHash) ok = await bcrypt.compare(code, doc._codeHash);
+    else if (doc.code) ok = String(doc.code) === code;
+    else if (doc._code) ok = String(doc._code) === code;
 
-    if (!out.ok) {
-      const map = {
-        not_found: { status: 400, msg: "Kod geçersiz veya süresi dolmuş" },
-        used:      { status: 400, msg: "Bu kod zaten kullanılmış" },
-        expired:   { status: 400, msg: "Kodun süresi dolmuş" },
-        locked:    { status: 423, msg: "Çok fazla hatalı deneme. Bir süre sonra tekrar deneyin." },
-        mismatch:  { status: 400, msg: `Kod hatalı${typeof out.attempts === "number" ? ` (${out.attempts}/${MAX_VERIFY_ATTEMPTS})` : ""}` },
-      };
-      const e = map[out.reason] || { status: 400, msg: "Kod doğrulanamadı" };
-      return res.status(e.status).json({ success: false, message: e.msg });
+    if (!ok) {
+      // attempts++ (email bazlı – birden çok kayıt varsa hepsi artsın)
+      await VerificationCode.updateMany({ email }, { $inc: { attempts: 1 } }, { strict: false }).catch(() => {});
+      return res.status(400).json({ success: false, message: "CODE_INVALID" });
     }
 
-    const token = jwt.sign({ email, scope: "email-verify" }, JWT_SECRET, { expiresIn: VERIFY_TOKEN_TTL });
-    return res.json({ success: true, message: "E-posta doğrulandı", token });
+    // Başarılı → ilgili e-postaya ait tüm kayıtları temizle ve kısa token üret
+    await VerificationCode.deleteMany({ email }).catch(() => {});
+    const emailVerifyToken = signEmailVerifyToken(email);
+    return res.json({ success: true, emailVerifyToken, expiresIn: 600 });
   } catch (err) {
-    console.error("❌ Verify Code Error:", err);
-    return res.status(500).json({ success: false, message: "Doğrulama hatası" });
+    next(err);
   }
 });
 
-/* ------------------------------ 🔑 Login (Admin & User) ------------------------------ */
+/* =========================================
+ * POST /api/auth/login
+ * Body: { email, password }
+ * Returns: { success, token, user }
+ * =======================================*/
 router.post("/login", async (req, res) => {
   try {
-    const email = normalizeEmail(req.body?.email);
+    const email = String(req.body?.email || "").trim().toLowerCase();
     const password = String(req.body?.password || "");
 
     if (!email || !password) {
       return res.status(400).json({ success: false, message: "E-posta ve şifre zorunlu" });
     }
 
-    // 1) ENV Admin kısa yol (ilk kurulum)
-    if (
-      process.env.ADMIN_EMAIL &&
-      process.env.ADMIN_PASSWORD &&
-      email === normalizeEmail(process.env.ADMIN_EMAIL) &&
-      password === process.env.ADMIN_PASSWORD
-    ) {
-      const token = jwt.sign({ email, role: "admin" }, JWT_SECRET, { expiresIn: "7d" });
-      res.cookie(COOKIE_NAME, token, COOKIE_OPTS);
-      return res.json({ success: true, message: "Admin girişi başarılı", token, user: { email, role: "admin" } });
+    const auth = await User.authenticate(email, password);
+
+    if (auth && auth.lockedUntil) {
+      return res.status(423).json({
+        success: false,
+        code: "LOCKED",
+        message: "Hesap geçici olarak kilitlendi. Lütfen daha sonra tekrar deneyin.",
+        retryAt: auth.lockedUntil,
+      });
     }
 
-    // 2) MongoDB kullanıcısı
-    const user = await User.findOne({ email: new RegExp(`^${email}$`, "i") }).select("+password role email");
-    if (!user) return res.status(401).json({ success: false, message: "Kullanıcı bulunamadı" });
+    if (!auth) {
+      return res.status(401).json({ success: false, message: "Geçersiz kimlik bilgileri" });
+    }
 
-    const ok = await bcrypt.compare(password, user.password);
-    if (!ok) return res.status(401).json({ success: false, message: "Geçersiz şifre" });
+    const user = auth;
+    const payload = { id: user._id, email: user.email, role: user.role || "user" };
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
 
-    const token = jwt.sign({ id: user._id, email: user.email, role: user.role || "user" }, JWT_SECRET, { expiresIn: "7d" });
     res.cookie(COOKIE_NAME, token, COOKIE_OPTS);
+
     return res.json({
       success: true,
       message: "Giriş başarılı",
       token,
-      user: { id: user._id, email: user.email, role: user.role || "user" },
+      user: {
+        id: user._id,
+        email: user.email,
+        role: user.role || "user",
+        name: user.name || null,
+      },
     });
   } catch (err) {
-    console.error("❌ Login Error:", err);
+    console.error("Login Error:", err);
     return res.status(500).json({ success: false, message: "Sunucu hatası" });
   }
 });
 
-/* ------------------------------ ➕ /auth/me ------------------------------ */
-// Me helper
-const getTokenFromReq = (req) => {
-  const hdr = req.headers.authorization || "";
-  const bearer = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : null;
-  return req.cookies?.token || bearer || null;
-};
-
-// GET /api/auth/me  → 404 hatasını giderir
-router.get("/me", (req, res) => {
-  const tok = getTokenFromReq(req);
-  if (!tok) return res.status(401).json({ success: false, message: "No token" });
+/* =========================================
+ * GET /api/auth/me
+ * Header: Authorization: Bearer <token>  (veya cookie)
+ * Returns: { success, user }
+ * =======================================*/
+router.get("/me", authenticate, async (req, res) => {
   try {
-    const payload = jwt.verify(tok, JWT_SECRET);
-    return res.json({ success: true, user: payload });
+    const { id, email, role } = req.user || {};
+    if (!id && !email) {
+      return res.status(401).json({ success: false, message: "Geçersiz token" });
+    }
+
+    let userDoc = null;
+    if (id) {
+      userDoc = await User.findById(id).select("email role name");
+    } else if (email) {
+      userDoc = await User.findOne({ email: new RegExp(`^${email}$`, "i") }).select("email role name");
+    }
+
+    if (!userDoc) {
+      return res.status(401).json({ success: false, message: "Kullanıcı bulunamadı" });
+    }
+
+    return res.json({
+      success: true,
+      user: {
+        id: userDoc._id,
+        email: userDoc.email,
+        role: userDoc.role || role || "user",
+        name: userDoc.name || null,
+        isAdmin: (userDoc.role || role || "user") === "admin",
+      },
+    });
   } catch {
-    return res.status(401).json({ success: false, message: "Invalid token" });
+    return res.status(401).json({ success: false, message: "Geçersiz token" });
   }
 });
 
-/* ------------------------------ 🚪 Logout ------------------------------ */
-router.post("/logout", async (_req, res) => {
-  try {
-    res.clearCookie(COOKIE_NAME, { ...COOKIE_OPTS, maxAge: 0 });
-    res.json({ success: true });
-  } catch {
-    res.json({ success: true });
-  }
+/* =========================================
+ * POST /api/auth/logout
+ * Cookie'yı temizler
+ * =======================================*/
+router.post("/logout", (req, res) => {
+  res.clearCookie(COOKIE_NAME, {
+    ...COOKIE_OPTS,
+    expires: new Date(0),
+  });
+  return res.json({ success: true, message: "Çıkış yapıldı" });
 });
 
 export default router;

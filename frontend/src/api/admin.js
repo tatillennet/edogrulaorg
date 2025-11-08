@@ -1,53 +1,26 @@
 // frontend/src/api/admin.js
 import axios from "axios";
+import { API_ROOT, apiPath } from "./base.js";
 
 /* ------------------------------------------------------------------
    Admin API — güvenli path + sağlam fallbacks
-   - baseURL kullanmıyoruz (çifte /api önlemek için)
-   - Auth: localStorage("adminToken") → Authorization: Bearer
+   - Mutlak URL’de baseURL kullanılmaz; göreli URL’de baseURL=API_ROOT
+   - Auth: localStorage("authToken") → Authorization: Bearer
    - CSV export (Blob) + normalize list
    - Retry sadece network/time-outlarda
-   - TAM LİSTE İÇİN: listBusinesses({ all:true }) veya limit/status geç
+   - Tüm liste: listBusinesses({ all:true }) veya limit/status geç
 ------------------------------------------------------------------- */
 
-// ---------------------------- Path helper ----------------------------
-const fixPath = (p = "/") => {
-  let s = String(p || "");
-  if (/^https?:\/\//i.test(s)) return s;               // mutlak URL ise bırak
-  s = s.startsWith("/") ? s : `/${s}`;
-  if (/^\/api(\/|$)/i.test(s)) s = s.replace(/^\/api/i, ""); // "/api/..." -> "/..."
-  return s;                                             // sonuç: "/admin/..." gibi
-};
-
-// -------------------------- Axios instance ---------------------------
-export const api = axios.create({
-  withCredentials: true,
-  timeout: 15000,
-});
-
-// İstek interceptor: token ekle + Accept + path düzelt
-api.interceptors.request.use((config) => {
-  const tok = getAdminToken();
-  if (tok) config.headers = { ...(config.headers || {}), Authorization: `Bearer ${tok}` };
-  if (!config.headers?.Accept) {
-    config.headers = { ...(config.headers || {}), Accept: "application/json" };
-  }
-  if (typeof config.url === "string") config.url = fixPath(config.url);
-  // baseURL boş kalsın (reverse proxy/aynı origin varsayımı)
-  config.baseURL = "";
-  return config;
-});
-
-/* -------------------------- Token utils -------------------------- */
+/* --------------------------- Token utils --------------------------- */
 export function getAdminToken() {
-  try { return localStorage.getItem("adminToken") || ""; } catch { return ""; }
+  try { return localStorage.getItem("authToken") || ""; } catch { return ""; }
 }
 export function setAdminToken(token) {
-  try { token ? localStorage.setItem("adminToken", token) : localStorage.removeItem("adminToken"); } catch {}
+  try { token ? localStorage.setItem("authToken", token) : localStorage.removeItem("authToken"); } catch {}
 }
 export function clearAdminToken() { setAdminToken(""); }
 
-/* --------------------------- Helpers ----------------------------- */
+/* ----------------------------- Helpers ----------------------------- */
 const cleanParams = (obj = {}) => {
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
@@ -102,15 +75,81 @@ const normalizeList = (data, fallback = []) => {
   };
 };
 
+const isFormLike = (data) => {
+  if (!data) return false;
+  if (typeof FormData !== "undefined" && data instanceof FormData) return true;
+  if (typeof URLSearchParams !== "undefined" && data instanceof URLSearchParams) return true;
+  if (typeof Blob !== "undefined" && data instanceof Blob) return true;
+  if (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer) return true;
+  return false;
+};
+
+/* -------------------------- Axios instance -------------------------- */
+export const api = axios.create({
+  withCredentials: true, // cookie kullanmıyorsan false da olabilir; Authorization ile sorun yok
+  timeout: 15000,
+});
+
+// 🔥 Her ihtimale karşı: global ve instance'tan x-auth-token’ı kaldır
+delete axios.defaults?.headers?.common?.["x-auth-token"];
+delete api.defaults?.headers?.common?.["x-auth-token"];
+
+// İstek interceptor: token ekle + Accept + URL normalizasyonu
+api.interceptors.request.use((config) => {
+  const tok = getAdminToken();
+  config.headers = config.headers || {};
+
+  // ✅ Sadece Authorization kullan
+  if (tok) config.headers.Authorization = `Bearer ${tok}`;
+  delete config.headers["x-auth-token"]; // güvence
+
+  if (!config.headers.Accept) config.headers.Accept = "application/json";
+
+  // JSON için Content-Type; FormData/Blob gibi ise dokunma
+  if (!config.headers["Content-Type"] && config.data && !isFormLike(config.data)) {
+    config.headers["Content-Type"] = "application/json";
+  }
+
+  // apiPath ile normalize et. Mutlak ise baseURL boş; göreli ise API_ROOT kullan.
+  if (typeof config.url === "string") {
+    const normalized = apiPath(config.url); // → "/admin/..." veya mutlak
+    config.url = normalized;
+    config.baseURL = /^https?:\/\//i.test(normalized) ? "" : (API_ROOT || "");
+  }
+
+  return config;
+});
+
+// Yanıt interceptor: 401/403 → token temizleme
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const status = err?.response?.status;
+    const base = (err?.config?.baseURL || "");
+    const url  = (err?.config?.url || "");
+    const full = `${base}${url}`;
+
+    if ((status === 401 || status === 403) &&
+        (full.includes("/auth/me") || full.includes("/admin/") || full.includes("/_adm/"))) {
+      clearAdminToken();
+      // İstersen: window.location.href = "/admin/login";
+    }
+    return Promise.reject(err);
+  }
+);
+
+/* --------------------------- Low-level request --------------------------- */
 const request = async (cfg, { retry = 0 } = {}) => {
   let lastErr;
   for (let i = 0; i <= retry; i++) {
     try {
-      const url = typeof cfg.url === "string" ? fixPath(cfg.url) : cfg.url; // emniyet
-      return await api.request({ ...cfg, url, baseURL: "" });
+      // URL’i yine emniyete al: apiPath & doğru baseURL
+      const url = typeof cfg.url === "string" ? apiPath(cfg.url) : cfg.url;
+      const baseURL = typeof url === "string" && /^https?:\/\//i.test(url) ? "" : (API_ROOT || "");
+      return await api.request({ ...cfg, url, baseURL });
     } catch (e) {
       lastErr = e;
-      // HTTP response aldıysak retry yok; yalnız ağ/time-out vs. için tekrar dene
+      // Sadece network/time-out gibi response olmayan hatalarda retry
       if (e?.response || i === retry) break;
       await new Promise((r) => setTimeout(r, 300 * (i + 1)));
     }
@@ -118,42 +157,15 @@ const request = async (cfg, { retry = 0 } = {}) => {
   throw lastErr;
 };
 
-// .env üzerinden varsayılan limit/status (opsiyonel)
 const ENV_DEFAULT_LIMIT = Number(import.meta?.env?.VITE_ADMIN_LIST_LIMIT ?? 1000) || 1000;
 const ENV_DEFAULT_STATUS = String(import.meta?.env?.VITE_ADMIN_LIST_STATUS ?? "all").toLowerCase();
 
 /* ============================ Businesses ============================ */
-/**
- * List businesses (normalized response)
- * - Tümünü çekmek için: { all:true } veya { mode: 'all' }
- * @param {{
- *   q?:string, page?:number, limit?:number, sort?:string,
- *   fields?:string, from?:string, to?:string, status?:"all"|"approved"|"pending"|"rejected",
- *   verified?:boolean, hidden?:boolean,
- *   format?:"csv", signal?:AbortSignal, retry?:number,
- *   all?:boolean, mode?:"page"|"all", maxPages?:number
- * }} opts
- */
 export async function listBusinesses(opts = {}) {
   const {
-    q = "",
-    page = 1,
-    limit = ENV_DEFAULT_LIMIT,            // yüksek default: 1000 (618’i kapsar)
-    sort = "-createdAt",
-    fields = "",
-    from,
-    to,
-    status = ENV_DEFAULT_STATUS,          // varsayılan: 'all' → filtre yok
-    verified,
-    hidden,
-    format,
-    signal,
-    retry = 1,
-
-    // all-fetch seçenekleri
-    all = false,
-    mode,
-    maxPages = 200,
+    q = "", page = 1, limit = ENV_DEFAULT_LIMIT, sort = "-createdAt", fields = "",
+    from, to, status = ENV_DEFAULT_STATUS, verified, hidden, format, signal,
+    retry = 1, all = false, mode, maxPages = 200,
   } = opts;
 
   const params = cleanParams({
@@ -164,7 +176,6 @@ export async function listBusinesses(opts = {}) {
     ...(format ? { format } : {}),
   });
 
-  /* ---------- CSV export ---------- */
   if (format === "csv") {
     const res = await request(
       { url: "/admin/businesses", method: "GET", params, responseType: "blob", signal },
@@ -185,14 +196,12 @@ export async function listBusinesses(opts = {}) {
     return { success: true, downloaded: true, filename: name };
   }
 
-  /* ---------- JSON (tek sayfa veya tüm sayfalar) ---------- */
   const fetchModeAll = all || mode === "all";
   if (!fetchModeAll) {
     const res = await request({ url: "/admin/businesses", method: "GET", params, signal }, { retry });
     return normalizeList(res.data, []);
   }
 
-  // → Tüm sayfaları topla
   let curPage = Number(params.page) || 1;
   const perPage = Number(params.limit) || 200;
   const acc = [];
@@ -209,43 +218,23 @@ export async function listBusinesses(opts = {}) {
       pages = norm.pages || 1;
       firstLimit = norm.limit || perPage;
     }
-    if (Array.isArray(norm.items) && norm.items.length) {
-      acc.push(...norm.items);
-    }
-    // bitecek koşullar
+    if (Array.isArray(norm.items) && norm.items.length) acc.push(...norm.items);
     if (!norm.items?.length || curPage >= pages || acc.length >= total) break;
-    // son sayfadaysa kır
     if (norm.items.length < (norm.limit || firstLimit || perPage)) break;
     curPage += 1;
   }
 
   return {
-    success: true,
-    items: acc,
-    total: total || acc.length,
-    page: 1,
-    pages,
-    limit: firstLimit || perPage,
+    success: true, items: acc, total: total || acc.length,
+    page: 1, pages, limit: firstLimit || perPage,
   };
 }
 
 /* ============================== Requests ============================ */
-/**
- * List verification requests (normalized)
- */
 export async function listRequests(opts = {}) {
   const {
-    status = "pending",
-    q = "",
-    page = 1,
-    limit = 20,
-    sort = "-createdAt",
-    fields = "",
-    from,
-    to,
-    format,
-    signal,
-    retry = 1,
+    status = "pending", q = "", page = 1, limit = 20, sort = "-createdAt",
+    fields = "", from, to, format, signal, retry = 1,
   } = opts;
 
   const params = cleanParams({
@@ -270,25 +259,20 @@ export async function listRequests(opts = {}) {
   return normalizeList(res.data, []);
 }
 
-/* ------- Request status mutations (with graceful fallbacks) -------- */
 export async function approveRequest(id, { signal } = {}) {
   try {
     await request({
       url: `/admin/requests/${encodeURIComponent(id)}/status`,
       method: "PATCH",
       data: { status: "approved" },
-      signal,
+      signal
     });
     return;
-  } catch (e) {
-    if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e;
-  }
+  } catch (e) { if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e; }
   try {
     await request({ url: `/admin/requests/${encodeURIComponent(id)}/approve`, method: "POST", signal });
     return;
-  } catch (e) {
-    if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e;
-  }
+  } catch (e) { if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e; }
   await request({ url: `/apply/${encodeURIComponent(id)}/approve`, method: "POST", signal });
 }
 
@@ -298,34 +282,22 @@ export async function rejectRequest(id, rejectReason = "", { signal } = {}) {
       url: `/admin/requests/${encodeURIComponent(id)}/status`,
       method: "PATCH",
       data: { status: "rejected", rejectReason },
-      signal,
+      signal
     });
     return;
-  } catch (e) {
-    if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e;
-  }
+  } catch (e) { if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e; }
   try {
     await request({
       url: `/admin/requests/${encodeURIComponent(id)}/reject`,
       method: "POST",
       data: { rejectReason },
-      signal,
+      signal
     });
     return;
-  } catch (e) {
-    if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e;
-  }
-  await request({
-    url: `/apply/${encodeURIComponent(id)}/reject`,
-    method: "POST",
-    data: { rejectReason },
-    signal,
-  });
+  } catch (e) { if (e?.response?.status !== 404 && e?.response?.status !== 405) throw e; }
+  await request({ url: `/apply/${encodeURIComponent(id)}/reject`, method: "POST", data: { rejectReason }, signal });
 }
 
-/**
- * Bulk status
- */
 export async function bulkSetRequestStatus(ids = [], status = "approved", rejectReason = "", { signal } = {}) {
   const { data } = await request({
     url: `/admin/requests/bulk-status`,
@@ -333,7 +305,7 @@ export async function bulkSetRequestStatus(ids = [], status = "approved", reject
     data: { ids, status, rejectReason },
     signal,
   });
-  return data; // { success, matched, modified }
+  return data;
 }
 
 /* ------------------------- Convenience exports -------------------- */

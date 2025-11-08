@@ -1,4 +1,4 @@
-// backend/routes/explore.js
+// backend/routes/explore.js — Pro sürüm (slug destekli + cache + facets)
 import express from "express";
 import Business from "../models/Business.js";
 
@@ -58,6 +58,10 @@ function pickLocationHint(qRaw, docs) {
   return "";
 }
 
+// Varsayılan projection (hem aramada hem slug listesinde)
+const DEFAULT_FIELDS =
+  "name slug gallery description summary features type city district instagramUsername website verified createdAt address phone phones coverImage coverUrl imageUrl images photos";
+
 /* -----------------------------------------------------------------------------
  * Tiny in-memory cache (prodda Redis önerilir)
  * -------------------------------------------------------------------------- */
@@ -77,19 +81,103 @@ function cacheSet(key, data) {
 }
 
 /* -----------------------------------------------------------------------------
- * GET /api/explore
- * Query:
- *   q (string)      : arama metni (zorunlu)
- *   page, limit     : sayfalama (default 1, 20; max 50)
- *   sort            : "-verified,-createdAt" gibi
- *   fields          : "name,slug,gallery" gibi daraltılmış projection
- *   city, district  : ekstra filtreler
- *   verified        : true/false
- *   status          : approved|pending|rejected|all
- *   facets=1        : city/district counts
+ * Ortak yardımcılar
+ * -------------------------------------------------------------------------- */
+function normalizeFieldsParam(fieldsParam, fallback = DEFAULT_FIELDS) {
+  if (!fieldsParam) return fallback;
+  return String(fieldsParam)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(" ");
+}
+
+function pickImage(b) {
+  return (
+    b.coverImage ||
+    b.coverUrl ||
+    b.imageUrl ||
+    (Array.isArray(b.images) && (b.images[0]?.url || b.images[0])) ||
+    (Array.isArray(b.photos) && (b.photos[0]?.url || b.photos[0])) ||
+    (Array.isArray(b.gallery) && b.gallery[0]) ||
+    PLACEHOLDER_IMAGE_URL
+  );
+}
+
+function buildSlugFilter(slug) {
+  const r = rx(slug);
+  return {
+    $or: [
+      { collection: r },
+      { collections: r },
+      { category: r },
+      { categories: r },
+      { tags: r },
+      { pageSlug: r },
+      { section: r },
+      { explore: r },
+      { exploreKeys: r },
+    ],
+  };
+}
+
+async function handleSlugQuery(req, res, slug) {
+  const limit = Math.max(1, Math.min(+req.query.limit || 500, 1000));
+  const page = Math.max(1, +req.query.page || 1);
+  const skip = (page - 1) * limit;
+  const fields = normalizeFieldsParam(req.query.fields);
+
+  // sort: varsayılan verified desc, createdAt desc
+  const sort = {};
+  const sortParam = String(req.query.sort || "-verified,-createdAt");
+  for (const part of sortParam.split(",").map((s) => s.trim()).filter(Boolean)) {
+    if (part.startsWith("-")) sort[part.slice(1)] = -1;
+    else sort[part] = 1;
+  }
+
+  const filter = buildSlugFilter(slug);
+  if (typeof req.query.verified === "string") {
+    const v = req.query.verified.toLowerCase();
+    if (v === "true" || v === "false") filter.verified = v === "true";
+  }
+  if (typeof req.query.status === "string" && req.query.status !== "all") {
+    filter.status = req.query.status;
+  }
+
+  const key = cacheKey(JSON.stringify({ kind: "slug", slug, page, limit, sort, fields, v: req.query.verified, s: req.query.status }));
+  const cached = cacheGet(key);
+  if (cached) return res.json(cached);
+
+  const [docs, total] = await Promise.all([
+    Business.find(filter).select(fields).sort(sort).skip(skip).limit(limit).lean(),
+    Business.countDocuments(filter),
+  ]);
+
+  const items = docs.map((b) => ({ ...b, _image: pickImage(b) }));
+
+  const payload = {
+    success: true,
+    slug,
+    page,
+    limit,
+    total,
+    items,
+  };
+  cacheSet(key, payload);
+  return res.json(payload);
+}
+
+/* -----------------------------------------------------------------------------
+ * GET /api/explore (arama)
+ * Ayrıca: /api/explore?slug=... gelirse otomatik slug listesine yönlendirir
  * -------------------------------------------------------------------------- */
 router.get("/", async (req, res) => {
   try {
+    // Eğer slug verilmişse, slug listesi döndür
+    if (req.query.slug) {
+      return await handleSlugQuery(req, res, String(req.query.slug || "").trim());
+    }
+
     const qRaw = String(req.query.q || "").trim();
 
     // Boş sorgu → boş payload
@@ -105,7 +193,7 @@ router.get("/", async (req, res) => {
         places: [],
         results: [],
         suggestions: [],
-        trending: []
+        trending: [],
       });
     }
 
@@ -123,20 +211,11 @@ router.get("/", async (req, res) => {
     }
 
     // Projection
-    let fields;
-    if (req.query.fields) {
-      fields = String(req.query.fields)
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .join(" ");
-    } else {
-      fields =
-        "name slug gallery description summary features type city district instagramUsername website verified createdAt address";
-    }
+    const fields = normalizeFieldsParam(req.query.fields);
 
     // Cache anahtarı (q|page|limit|sort|filters|fields)
     const qsKey = JSON.stringify({
+      kind: "search",
       qRaw,
       page,
       limit,
@@ -145,7 +224,7 @@ router.get("/", async (req, res) => {
       city: req.query.city || "",
       district: req.query.district || "",
       verified: req.query.verified || "",
-      status: req.query.status || ""
+      status: req.query.status || "",
     });
     const cKey = cacheKey(qsKey);
     const cached = cacheGet(cKey);
@@ -167,8 +246,10 @@ router.get("/", async (req, res) => {
               { address: rx(t) },
               { city: rx(t) },
               { district: rx(t) },
-              { website: rx(t) }
-            ]
+              { website: rx(t) },
+              { tags: rx(t) },
+              { categories: rx(t) },
+            ],
           }))
         : [
             {
@@ -179,19 +260,16 @@ router.get("/", async (req, res) => {
                 { district: rx(qRaw) },
                 { instagramUsername: rx(qRaw) },
                 { type: rx(qRaw) },
-                { website: rx(qRaw) }
-              ]
-            }
+                { website: rx(qRaw) },
+                { tags: rx(qRaw) },
+                { categories: rx(qRaw) },
+              ],
+            },
           ];
 
     // Telefon ipucu (6+ hane)
     if (digits.length >= 6) {
-      andParts.push({
-        $or: [
-          { phone: rx(digits) },
-          { phones: rx(digits) } // array regex match
-        ]
-      });
+      andParts.push({ $or: [{ phone: rx(digits) }, { phones: rx(digits) }] }); // array regex match
     }
 
     // Ek filtreler
@@ -211,15 +289,15 @@ router.get("/", async (req, res) => {
     // Toplam & sayfa verisi
     const [docs, total] = await Promise.all([
       Business.find(filter).select(fields).sort(sort).skip(skip).limit(limit).lean(),
-      Business.countDocuments(filter)
+      Business.countDocuments(filter),
     ]);
 
     // Places (grid) — en fazla 8
     const places = docs.slice(0, 8).map((b) => ({
       name: b.name,
       url: `/isletme/${b.slug || b._id}`,
-      image: (Array.isArray(b.gallery) && b.gallery[0]) || PLACEHOLDER_IMAGE_URL,
-      slug: b.slug || String(b._id)
+      image: pickImage(b),
+      slug: b.slug || String(b._id),
     }));
 
     // SERP benzeri sonuçlar
@@ -228,7 +306,7 @@ router.get("/", async (req, res) => {
       url: `/isletme/${b.slug || b._id}`,
       snippet: buildSnippet(b),
       breadcrumbs: [`edogrula.org › ${b.slug || b._id}`],
-      slug: b.slug || String(b._id)
+      slug: b.slug || String(b._id),
     }));
 
     // Öneriler
@@ -236,7 +314,7 @@ router.get("/", async (req, res) => {
       qRaw,
       ...(docs[0]?.city ? [`${docs[0].city} bungalov evleri`] : []),
       "instagram doğrulama",
-      "işletme telefonu sorgula"
+      "işletme telefonu sorgula",
     ].filter(Boolean);
 
     // Trendler (kısa, benzersiz)
@@ -259,14 +337,14 @@ router.get("/", async (req, res) => {
               .filter(Boolean)
           )
           .filter(Boolean)
-      )
+      ),
     ].slice(0, 8);
 
     const location = pickLocationHint(qRaw, docs);
 
     const payload = {
       success: true,
-      vertical: "lodging", // UI’da üstte konaklama şeridi varsa "lodging"
+      vertical: "lodging",
       query: qRaw,
       location,
       page,
@@ -275,7 +353,7 @@ router.get("/", async (req, res) => {
       places,
       results,
       suggestions,
-      trending
+      trending,
     };
 
     cacheSet(cKey, payload);
@@ -294,14 +372,14 @@ router.get("/", async (req, res) => {
       results: [],
       suggestions: [],
       trending: [],
-      message: "Explore error"
+      message: "Explore error",
     });
   }
 });
 
 /* -----------------------------------------------------------------------------
  * (Opsiyonel) Facets: city/district dağılımı
- * GET /api/explore/facets?q=...  (aynı tokenize/filters mantığı)
+ * GET /api/explore/facets?q=...
  * -------------------------------------------------------------------------- */
 router.get("/facets", async (req, res) => {
   try {
@@ -320,8 +398,8 @@ router.get("/facets", async (req, res) => {
               { address: rx(t) },
               { city: rx(t) },
               { district: rx(t) },
-              { website: rx(t) }
-            ]
+              { website: rx(t) },
+            ],
           }))
         : [
             {
@@ -332,15 +410,13 @@ router.get("/facets", async (req, res) => {
                 { district: rx(qRaw) },
                 { instagramUsername: rx(qRaw) },
                 { type: rx(qRaw) },
-                { website: rx(qRaw) }
-              ]
-            }
+                { website: rx(qRaw) },
+              ],
+            },
           ];
 
     if (digits.length >= 6) {
-      andParts.push({
-        $or: [{ phone: rx(digits) }, { phones: rx(digits) }]
-      });
+      andParts.push({ $or: [{ phone: rx(digits) }, { phones: rx(digits) }] });
     }
 
     const filter = { $and: andParts };
@@ -350,26 +426,51 @@ router.get("/facets", async (req, res) => {
         { $match: filter },
         { $group: { _id: "$city", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
-        { $limit: 20 }
+        { $limit: 20 },
       ]),
       Business.aggregate([
         { $match: filter },
         { $group: { _id: "$district", count: { $sum: 1 } } },
         { $sort: { count: -1 } },
-        { $limit: 20 }
-      ])
+        { $limit: 20 },
+      ]),
     ]);
 
     return res.json({
       success: true,
       facets: {
         city: byCity.filter((x) => x._id).map((x) => ({ value: x._id, count: x.count })),
-        district: byDistrict.filter((x) => x._id).map((x) => ({ value: x._id, count: x.count }))
-      }
+        district: byDistrict.filter((x) => x._id).map((x) => ({ value: x._id, count: x.count })),
+      },
     });
   } catch (e) {
     console.error("explore facets error:", e);
     return res.status(500).json({ success: false, message: "Facets error" });
+  }
+});
+
+/* -----------------------------------------------------------------------------
+ * Slug tabanlı kısa yollar
+ *  - GET /api/explore/by-slug/:slug
+ *  - GET /api/explore/:slug  (facets ile çakışmayı önlemek için guard var)
+ * -------------------------------------------------------------------------- */
+router.get("/by-slug/:slug", async (req, res) => {
+  const slug = String(req.params.slug || "").trim();
+  if (!slug) return res.json({ success: true, slug: "", items: [], total: 0, page: 1, limit: 0 });
+  try { return await handleSlugQuery(req, res, slug); }
+  catch (e) {
+    console.error("explore by-slug error:", e);
+    return res.status(500).json({ success: false, message: "Explore by-slug error" });
+  }
+});
+
+router.get("/:slug", async (req, res, next) => {
+  const slug = String(req.params.slug || "").trim();
+  if (!slug || slug.toLowerCase() === "facets") return next(); // /facets için
+  try { return await handleSlugQuery(req, res, slug); }
+  catch (e) {
+    console.error("explore slug error:", e);
+    return res.status(500).json({ success: false, message: "Explore slug error" });
   }
 });
 

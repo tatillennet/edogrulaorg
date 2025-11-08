@@ -37,7 +37,7 @@ function makePublicUrl(rel) {
   if (!rel) return undefined;
   if (/^https?:\/\//i.test(rel)) return rel; // zaten tam URL
   const base = (process.env.FILE_BASE_URL || "").replace(/\/+$/, ""); // örn: http://localhost:5000
-  const cleanRel = String(rel).replace(/^\/+/, "");
+  const cleanRel = String(rel).replace(/^\/+/, "").replace(/\/{2,}/g, "/");
   return base ? `${base}/${cleanRel}` : `/${cleanRel}`;
 }
 
@@ -73,6 +73,14 @@ function capAndNormalizeDocs(docs = []) {
     .filter(Boolean);
 
   return arr.slice(0, MAX_DOCS);
+}
+
+// İl/İlçe'yi güvenle normalize et (trim + max length)
+function normCity(s) {
+  return String(s || "").trim().slice(0, 64) || undefined;
+}
+function normDistrict(s) {
+  return String(s || "").trim().slice(0, 64) || undefined;
 }
 
 /* ----------------------- file sub-schema ----------------------- */
@@ -111,18 +119,25 @@ const VerificationRequestSchema = new mongoose.Schema(
 
     phone: { type: String, trim: true },            // phoneMobile (legacy)
     landline: { type: String, trim: true },         // phoneFixed (legacy)
-    address: { type: String, trim: true },
+
+    // İl/İlçe (UI'da ayrı alanlar)
+    city: { type: String, trim: true, maxlength: 64, index: true },
+    district: { type: String, trim: true, maxlength: 64, index: true },
+
+    // Eski tekil adres alanı geriye dönük uyumluluk için korunur
+    address: { type: String, trim: true, maxlength: 256 },
 
     email: { type: String, trim: true, lowercase: true, index: true }, // opsiyonel
     website: { type: String, trim: true },
 
     note: { type: String, trim: true, default: "" },
 
-    documents: { type: [FileSchema], default: [] },
+    documents: { type: [FileSchema], default: [] }, // PDF + görseller (maks 5)
 
     status: {
+      // Admin UI ile tam uyum
       type: String,
-      enum: ["pending", "approved", "rejected"],
+      enum: ["pending", "in_review", "approved", "rejected", "archived", "spam"],
       default: "pending",
       index: true,
     },
@@ -147,7 +162,7 @@ const VerificationRequestSchema = new mongoose.Schema(
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
     strict: true,
-    collection: "applyrequests", // 🔴 mevcut veriye bağlan
+    collection: "applyrequests", // mevcut veriye bağlan
   }
 );
 
@@ -156,7 +171,7 @@ VerificationRequestSchema.virtual("requestId").get(function () {
   return this._id?.toString();
 });
 
-/* Alanları geriye dönük birleştiren sanal alanlar (listelemelerde işe yarar) */
+// Listelemelerde pratik sanallar
 VerificationRequestSchema.virtual("nameResolved").get(function () {
   return this.name || this.businessName || "";
 });
@@ -171,6 +186,12 @@ VerificationRequestSchema.virtual("landlineResolved").get(function () {
 });
 VerificationRequestSchema.virtual("instagramUrlResolved").get(function () {
   return this.instagramUrl || this.instagram || "";
+});
+VerificationRequestSchema.virtual("cityResolved").get(function () {
+  return this.city || "";
+});
+VerificationRequestSchema.virtual("districtResolved").get(function () {
+  return this.district || "";
 });
 
 /* ----------------------- normalization ----------------------- */
@@ -189,11 +210,20 @@ function applyNormalization(carrier) {
   carrier.phone = normalizePhone(carrier.phone || carrier.phoneMobile);
   carrier.landline = normalizePhone(carrier.landline || carrier.phoneFixed);
 
-  // belgeler: documents yoksa legacy docs/images kullan
-  const docsCombined =
-    (carrier.documents && carrier.documents.length ? carrier.documents : [])
-      .concat(carrier.docs || [])
-      .concat(carrier.images || []);
+  // İl/İlçe normalize
+  carrier.city = normCity(carrier.city);
+  carrier.district = normDistrict(carrier.district);
+
+  // Eski tekil adres alanını geriye dönük doldur (varsa koru)
+  if (!carrier.address) {
+    const parts = [carrier.district, carrier.city].filter(Boolean);
+    if (parts.length) carrier.address = parts.join(", ");
+  }
+
+  // Belgeler: documents yoksa legacy docs/images kullan
+  const docsCombined = (carrier.documents && carrier.documents.length ? carrier.documents : [])
+    .concat(carrier.docs || [])
+    .concat(carrier.images || []);
   carrier.documents = capAndNormalizeDocs(docsCombined);
 }
 
@@ -223,11 +253,13 @@ VerificationRequestSchema.index({ createdAt: -1 });
 VerificationRequestSchema.index({ email: 1, status: 1, createdAt: -1 });
 VerificationRequestSchema.index({ instagramUsername: 1 });
 VerificationRequestSchema.index({ phone: 1 });
+// Şehir/İlçe sorguları için bileşik indeks
+VerificationRequestSchema.index({ city: 1, district: 1, createdAt: -1 });
 
-// Text arama
+// Text arama — city/district eklendi
 VerificationRequestSchema.index(
-  { name: "text", businessName: "text", address: "text", instagramUsername: "text" },
-  { weights: { name: 5, businessName: 5, instagramUsername: 3, address: 1 } }
+  { name: "text", businessName: "text", address: "text", instagramUsername: "text", city: "text", district: "text" },
+  { weights: { name: 5, businessName: 5, instagramUsername: 3, city: 2, district: 2, address: 1 } }
 );
 
 /* ----------------------- clean json ----------------------- */
@@ -255,6 +287,16 @@ VerificationRequestSchema.set("toJSON", {
         .concat(ret.docs || [])
         .concat(ret.images || []);
       ret.documents = capAndNormalizeDocs(merged);
+    }
+
+    // İl/İlçe JSON'da garanti olsun (undefined yerine boş string)
+    ret.city = ret.city || "";
+    ret.district = ret.district || "";
+
+    // Address yoksa türet (UI geri uyum)
+    if (!ret.address) {
+      const parts = [ret.district || "", ret.city || ""].filter(Boolean);
+      ret.address = parts.join(", ");
     }
 
     // Gürültüyü temizle

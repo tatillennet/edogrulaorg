@@ -1,7 +1,5 @@
 // src/main.jsx
-import "./api/axios-boot";          // ✅ tek import yeterli
-// import "./api/axios-boot.js";    // ❌ kaldır
-
+import "./api/axios-boot";
 import "./index.css";
 
 import React from "react";
@@ -12,30 +10,42 @@ import {
   Outlet,
   Link,
   useLocation,
+  Navigate,
 } from "react-router-dom";
-import { HelmetProvider } from "react-helmet-async";  // ✅ EKLENDİ
+import { HelmetProvider } from "react-helmet-async";
 
-import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import Search from "./pages/Search";
-import Apply from "./pages/Apply";
-import Report from "./pages/Report";
-import BusinessProfile from "./pages/BusinessProfile";
-import VerifyEmail from "./pages/VerifyEmail";
-import Results from "./pages/Results";
-import SapancaBungalov from "./pages/SapancaBungalov";
-import BlacklistProfile from "./pages/BlacklistProfile";
-import AdminContent from "./pages/AdminContent";
+/* ===================== Lazy pages ===================== */
+const Login = React.lazy(() => import("./pages/Login"));
+const Search = React.lazy(() => import("./pages/Search"));
+const Apply = React.lazy(() => import("./pages/Apply"));
+const Report = React.lazy(() => import("./pages/Report"));
+const BusinessProfile = React.lazy(() => import("./pages/BusinessProfile"));
+const VerifyEmail = React.lazy(() => import("./pages/VerifyEmail"));
+const Results = React.lazy(() => import("./pages/Results"));
+const SapancaBungalov = React.lazy(() => import("./pages/SapancaBungalov"));
+const BlacklistProfile = React.lazy(() => import("./pages/BlacklistProfile"));
+const KVKK = React.lazy(() => import("./pages/KVKK"));
+const SSS = React.lazy(() => import("./pages/SSS"));
+const Hakkimizda = React.lazy(() => import("./pages/Hakkimizda"));
 
-/* ===================== URL Normalization (assets only) ===================== */
+const AdminContent = React.lazy(() => import("./pages/AdminContent"));
+const Dashboard = React.lazy(() => import("./pages/Dashboard"));
+const Businesses = React.lazy(() => import("./pages/Businesses"));
+const Applications = React.lazy(() => import("./pages/Applications"));
+const Archive = React.lazy(() => import("./pages/Archive"));
+const Reports = React.lazy(() => import("./pages/Reports"));
+const Blacklist = React.lazy(() => import("./pages/Blacklist"));
+const Featured = React.lazy(() => import("./pages/Featured"));
+const Supw = React.lazy(() => import("./pages/Supw"));
+
+/* ===================== Asset normalize ===================== */
 function normalizeAssetPath(p) {
   if (!p) return p;
   const s0 = String(p).trim();
   if (/^(https?:)?\/\//i.test(s0) || /^(data|blob):/i.test(s0)) return s0;
-  let s = s0;
-  if (s.startsWith("/")) return s.replace(/\/{2,}/g, "/");
-  if (/^\/\/uploads\//i.test(s)) return s.replace(/^\/\//, "/");
-  if (/^uploads\//i.test(s)) return "/" + s.replace(/^\/+/, "");
+  if (s0.startsWith("/")) return s0.replace(/\/{2,}/g, "/");
+  if (/^\/\/uploads\//i.test(s0)) return s0.replace(/^\/\//, "/");
+  if (/^uploads\//i.test(s0)) return "/" + s0.replace(/^\/+/, "");
   return s0;
 }
 function normalizeBackgroundImage(el) {
@@ -96,7 +106,7 @@ function useLiveAssetFix() {
   }, []);
 }
 
-/* ===================== Router & Layout ===================== */
+/* ===================== UX helpers ===================== */
 function ScrollToTop() {
   const { pathname } = useLocation();
   React.useEffect(() => {
@@ -104,15 +114,42 @@ function ScrollToTop() {
   }, [pathname]);
   return null;
 }
-function RootLayout() {
-  useLiveAssetFix();
-  return (
-    <>
-      <ScrollToTop />
-      <Outlet />
-    </>
-  );
+
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          role="alert"
+          style={{
+            fontFamily: "Segoe UI, system-ui, -apple-system, Arial, sans-serif",
+            padding: 24,
+            textAlign: "center",
+          }}
+        >
+          <h2 style={{ color: "#c0392b", marginBottom: 8 }}>
+            Beklenmeyen bir hata oluştu
+          </h2>
+          <p style={{ margin: "4px 0 16px" }}>
+            Sayfayı yenilemeyi deneyebilir veya birazdan tekrar gelebilirsiniz.
+          </p>
+          <Link to="/" style={{ color: "#2980b9", fontWeight: 600 }}>
+            Ana Sayfa
+          </Link>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
+
 function NotFound() {
   return (
     <div
@@ -124,7 +161,9 @@ function NotFound() {
       role="alert"
       aria-live="assertive"
     >
-      <h2 style={{ color: "#c0392b", marginBottom: 8 }}>404 - Sayfa Bulunamadı</h2>
+      <h2 style={{ color: "#c0392b", marginBottom: 8 }}>
+        404 - Sayfa Bulunamadı
+      </h2>
       <p style={{ margin: "4px 0 16px" }}>Aradığınız sayfa mevcut değil.</p>
       <Link to="/" style={{ color: "#2980b9", fontWeight: 600 }}>
         Ana Sayfaya Dön
@@ -133,47 +172,121 @@ function NotFound() {
   );
 }
 
+function RootLayout() {
+  useLiveAssetFix();
+  return (
+    <>
+      <ScrollToTop />
+      <React.Suspense
+        fallback={<div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>}
+      >
+        <Outlet />
+      </React.Suspense>
+    </>
+  );
+}
+
+/* ===================== Basename ===================== */
+const BASENAME =
+  (import.meta.env.VITE_BASENAME ?? import.meta.env.BASE_URL ?? "/")
+    .toString()
+    .replace(/\/+$/, "") || "/";
+
+/* ===================== Router ===================== */
 const router = createBrowserRouter(
   [
     {
       path: "/",
-      element: <RootLayout />,
+      element: (
+        <ErrorBoundary>
+          <RootLayout />
+        </ErrorBoundary>
+      ),
       children: [
+        // Public
         { index: true, element: <Search /> },
         { path: "apply", element: <Apply /> },
         { path: "report", element: <Report /> },
         { path: "ara", element: <Results /> },
         { path: "search", element: <Results /> },
         { path: "sapanca-bungalov-evleri", element: <SapancaBungalov /> },
+
+        // Kara Liste — hem :id hem :slug destekli
+        { path: "kara-liste/:id", element: <BlacklistProfile /> },
         { path: "kara-liste/:slug", element: <BlacklistProfile /> },
+
         { path: "business/:slug", element: <BusinessProfile /> },
         { path: "isletme/:slug", element: <BusinessProfile /> },
         { path: "b/:slug", element: <BusinessProfile /> },
-        { path: ":slug", element: <BusinessProfile /> },
         { path: "verify-email", element: <VerifyEmail /> },
+
+        // Statik sayfalar — catch-all’dan önce
+        { path: "kvkk", element: <KVKK /> },
+        { path: "sss", element: <SSS /> },
+        { path: "hakkimizda", element: <Hakkimizda /> },
+
+        // Eski/alternatif bağlantılar
+        { path: "kvk", element: <Navigate to="/kvkk" replace /> },
+        { path: "hakkımızda", element: <Navigate to="/hakkimizda" replace /> },
+
+        // SUPW
+        { path: "supw", element: <Supw /> },
+
+        // Admin
         { path: "admin/login", element: <Login /> },
-        { path: "admin/dashboard", element: <Dashboard /> },
-        { path: "admin", element: <NotFound /> },
+        {
+          path: "admin",
+          element: <Dashboard />,
+          children: [
+            { index: true, element: <Navigate to="businesses" replace /> },
+            { path: "businesses", element: <Businesses /> },
+            { path: "applications", element: <Applications /> },
+            { path: "archive", element: <Archive /> },
+            { path: "reports", element: <Reports /> },
+            { path: "blacklist", element: <Blacklist /> },
+            { path: "featured", element: <Featured /> },
+            { path: "*", element: <NotFound /> },
+          ],
+        },
+
+        // Eski admin rota
+        {
+          path: "admin/dashboard",
+          element: <Dashboard />,
+          children: [
+            { index: true, element: <Businesses /> },
+            { path: "businesses", element: <Businesses /> },
+            { path: "applications", element: <Applications /> },
+            { path: "archive", element: <Archive /> },
+            { path: "reports", element: <Reports /> },
+            { path: "blacklist", element: <Blacklist /> },
+            { path: "featured", element: <Featured /> },
+          ],
+        },
+
+        // Geniş yakalayıcı — EN SONDA!
+        { path: ":slug", element: <BusinessProfile /> },
+
+        // 404
         { path: "*", element: <NotFound /> },
-        { path: "admin/content", element: <AdminContent /> },
       ],
     },
   ],
-  { future: { v7_startTransition: true, v7_relativeSplatPath: true } }
+  {
+    basename: BASENAME === "/" ? undefined : BASENAME,
+    future: { v7_startTransition: true, v7_relativeSplatPath: true },
+  }
 );
 
 /* ===================== Mount ===================== */
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(
   <React.StrictMode>
-    {/* ✅ Helmet context tüm uygulama için burada sağlanıyor */}
     <HelmetProvider>
       <RouterProvider
         router={router}
         future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
-        fallbackElement={
-          <div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>
-        }
+        fallbackElement={<div style={{ padding: 24, textAlign: "center" }}>Yükleniyor…</div>}
       />
     </HelmetProvider>
   </React.StrictMode>

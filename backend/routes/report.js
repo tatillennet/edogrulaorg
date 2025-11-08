@@ -1,378 +1,302 @@
 // backend/routes/report.js
-import express from "express";
-import jwt from "jsonwebtoken";
+import { Router } from "express";
 import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "path";
-import fs from "fs/promises";
-import { fileURLToPath } from "url";
-
+import fs from "fs";
 import Report from "../models/Report.js";
-import Blacklist from "../models/Blacklist.js";
 
-const router = express.Router();
+const router = Router();
+const isValidObjectId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
 
-/* ───────────────────────── Config ───────────────────────── */
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UPLOAD_ROOT = path.join(process.cwd(), "uploads");
-const REQUIRE_REPORT_VERIFY = String(process.env.REQUIRE_REPORT_VERIFY || "true").toLowerCase() === "true";
-const FILE_BASE = (process.env.FILE_BASE_URL || "").replace(/\/+$/, "");
+const ok = (res, data = {}, status = 200) =>
+  res.status(status).json({ success: true, ...data });
 
-/* ───────────────────────── Helpers ───────────────────────── */
-const sanitize = (v, max = 300) =>
-  typeof v === "string" ? v.trim().slice(0, max) : undefined;
+const fail = (res, message = "Hata", status = 400, code) =>
+  res
+    .status(status)
+    .json({ success: false, message, ...(code ? { code } : {}) });
 
-const escapeRegex = (s = "") => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const rx = (s) => new RegExp(escapeRegex(s), "i");
-
-const unAt = (s) => String(s || "").replace(/^@+/, "").trim();
-
-const makePublicUrl = (rel) => {
-  const clean = String(rel || "").replace(/^\/+/, "");
-  return FILE_BASE ? `${FILE_BASE}/${clean}` : `/${clean}`;
-};
-
-const ensureDir = async (p) => fs.mkdir(p, { recursive: true });
-
-/* ───────────────────────── Auth middlewares ───────────────────────── */
-// Admin: JWT (role=admin) veya ADMIN_KEY
-function requireAdmin(req, res, next) {
+/* ===================== Admin tespiti ===================== */
+/**
+ * - x-admin-key == ADMIN_KEY
+ * - Authorization: Bearer <jwt> (payload.role === "admin")
+ * - ?admin=1 (dev kısayolu)
+ */
+function isAdminRequest(req) {
   try {
-    // 1) JWT
-    const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-    if (bearer) {
+    const adminKey = req.headers["x-admin-key"];
+    const needKey = process.env.ADMIN_KEY;
+    if (needKey && String(adminKey) === String(needKey)) return true;
+
+    const bearer = (req.headers.authorization || "").replace(
+      /^Bearer\s+/i,
+      ""
+    );
+    if (bearer && process.env.JWT_SECRET) {
       const payload = jwt.verify(bearer, process.env.JWT_SECRET);
-      if (payload?.role === "admin") return next();
+      if (payload?.role === "admin") return true;
     }
-    // 2) ADMIN_KEY
-    const sent = req.headers["x-admin-key"] || bearer;
-    const need = process.env.ADMIN_KEY;
-    if (need && String(sent) === String(need)) return next();
-
-    return res.status(401).json({ success: false, message: "Yetkisiz" });
   } catch {
-    return res.status(401).json({ success: false, message: "Yetkilendirme hatası" });
+    // sessiz düş
   }
+  const q = req.query.admin;
+  if (q === "1" || q === "true") return true;
+  return false;
 }
 
-// Public ihbar için e-posta doğrulama
-function requireVerifiedEmail(req, res, next) {
-  if (!REQUIRE_REPORT_VERIFY) return next(); // dev/test için kapatılabilir
+/* ===================== Dev log ===================== */
 
-  const token =
-    req.headers["x-verify-token"] ||
-    req.headers["x-verifyemail"] ||
-    req.headers["x-verify"];
+router.use((req, _res, next) => {
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[REPORT]", req.method, req.originalUrl);
+  }
+  next();
+});
 
-  if (!token) {
-    return res.status(401).json({ success: false, message: "E-posta doğrulaması gerekiyor" });
-  }
-  try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET);
-    if (payload?.scope !== "email-verify" || !payload?.email) {
-      return res.status(401).json({ success: false, message: "Geçersiz doğrulama kapsamı" });
-    }
-    req.verifiedEmail = payload.email;
-    next();
-  } catch {
-    return res.status(401).json({ success: false, message: "Doğrulama token'ı geçersiz veya süresi dolmuş" });
-  }
+/* ===================== Upload config ===================== */
+
+const UPLOADS_DIR =
+  process.env.UPLOADS_DIR || path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 }
 
-/* ───────────────────────── Multer (evidence) ───────────────────────── */
-// memoryStorage + biz yazıyoruz → klasör: /uploads/report/<reportId>/
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 10 }, // 10MB, max 10 dosya
-  fileFilter: (_req, file, cb) => {
-    const ok = ["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(file.mimetype);
-    cb(ok ? null : new Error("INVALID_FILE_TYPE"), ok);
+const ASSET_BASE =
+  (process.env.ASSET_BASE || "/uploads").replace(/\/+$/, "") || "/uploads";
+
+const ALLOWED_MIME = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+];
+const MAX_FILES = 10;
+const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname) || "";
+    const base = path
+      .basename(file.originalname, ext)
+      .replace(/[^\w.-]+/g, "_")
+      .slice(0, 80);
+    cb(null, `report_${Date.now()}_${base}${ext}`);
   },
 });
 
-const extFromMime = (m) =>
-  m?.includes("jpeg") ? ".jpg" :
-  m?.includes("png") ? ".png" :
-  m?.includes("webp") ? ".webp" :
-  m?.includes("pdf") ? ".pdf" : "";
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_SIZE, files: MAX_FILES },
+  fileFilter: (_req, file, cb) => {
+    if (!ALLOWED_MIME.includes(file.mimetype)) {
+      return cb(new Error("BAD_FILE_TYPE"));
+    }
+    cb(null, true);
+  },
+});
 
-/* ───────────────────────── Create Report (public) ───────────────────────── */
+/* ===================== Helpers ===================== */
+
+const getClientIp = (req) => {
+  const xf = req.headers["x-forwarded-for"];
+  if (typeof xf === "string" && xf.length) {
+    return xf.split(",")[0].trim();
+  }
+  return (
+    req.headers["x-real-ip"] ||
+    req.connection?.remoteAddress ||
+    req.socket?.remoteAddress ||
+    req.ip ||
+    ""
+  );
+};
+
+// frontend zaten x-verify-token gönderiyor; sadece varlığını kontrol ediyoruz
+function requireVerifyToken(req, res, next) {
+  const vt = req.headers["x-verify-token"];
+  if (!vt) {
+    return fail(
+      res,
+      "Doğrulama gerekli. Lütfen e-posta doğrulamasını tamamlayın.",
+      401,
+      "VERIFY_REQUIRED"
+    );
+  }
+  req.verifyToken = vt;
+  next();
+}
+
+/* ===================== POST /api/report ===================== */
 /**
- * POST /api/report
- * Form-Data:
- *  - name, instagramUsername, instagramUrl, phone, desc
- *  - evidence[] (jpg/png/webp/pdf, max 10)
- * Header:
- *  - x-verify-token (REQUIRE_REPORT_VERIFY=true ise zorunlu)
+ * Public ihbar oluşturma
+ * Body: multipart/form-data
+ * - name, instagramUsername, instagramUrl, phone, desc
+ * - reporterEmail, reporterName, reporterPhone (opsiyonel)
+ * - consent ("true"), policyVersion, userAgent
+ * - evidence: dosyalar
+ * - evidenceNotes: JSON (şimdilik opsiyonel, stored değil)
  */
-router.post("/", requireVerifiedEmail, upload.array("evidence", 10), async (req, res) => {
-  const cleanup = async (absFiles = []) => {
-    await Promise.allSettled(absFiles.map((f) => fs.unlink(f)));
-  };
+router.post(
+  "/",
+  requireVerifyToken,
+  upload.array("evidence", MAX_FILES),
+  async (req, res, next) => {
+    try {
+      const { body } = req;
+      const files = req.files || [];
 
-  const absWritten = [];
-  try {
-    // Zorunlu alan yok; en az bir kimlik alanı şart
-    const name = sanitize(req.body.name, 120);
-    const igUser = sanitize(req.body.instagramUsername, 120);
-    const igUrl = sanitize(req.body.instagramUrl, 400);
-    const phone = sanitize(req.body.phone, 64);
-    const desc = sanitize(req.body.desc, 2000);
-
-    if (!name && !igUser && !igUrl && !phone) {
-      return res.status(400).json({
-        success: false,
-        message: "En az bir alan gerekli: işletme adı / IG kullanıcı adı / IG URL / telefon",
+      const evidenceFiles = files.map((f) => {
+        // URL olarak sakla: /uploads/...
+        return `${ASSET_BASE}/${f.filename}`;
       });
+
+      const payload = {
+        ...body,
+        evidenceFiles,
+        createdByIp: body.createdByIp || getClientIp(req),
+        userAgent: body.userAgent || req.headers["user-agent"],
+      };
+
+      const data = Report.fromPayload(payload);
+
+      if (!data.consent) {
+        return fail(
+          res,
+          "Yasal sorumluluk onayını işaretlemeniz gerekiyor.",
+          400,
+          "CONSENT_REQUIRED"
+        );
+      }
+
+      if (!data.name || !data.desc) {
+        return fail(
+          res,
+          "Lütfen işletme adı ve açıklama alanlarını doldurun.",
+          400,
+          "VALIDATION_ERROR"
+        );
+      }
+
+      const doc = await Report.create(data);
+
+      return ok(res, { id: doc._id, report: doc }, 201);
+    } catch (err) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return fail(
+          res,
+          "Dosya boyutu çok büyük (maksimum 10MB).",
+          413,
+          "FILE_TOO_LARGE"
+        );
+      }
+      if (err.message === "BAD_FILE_TYPE") {
+        return fail(
+          res,
+          "Sadece JPG, PNG, WEBP veya PDF dosyaları yükleyebilirsiniz.",
+          400,
+          "BAD_FILE_TYPE"
+        );
+      }
+      return next(err);
     }
-
-    // Önce boş raporu oluştur (klasör ismi için ID lazım)
-    const report = await Report.create({
-      name,
-      instagramUsername: igUser ? unAt(igUser) : undefined,
-      instagramUrl: igUrl,
-      phone,
-      desc,
-      reporterEmail: req.verifiedEmail || undefined,
-      evidenceFiles: [], // dosyaları birazdan ekleyeceğiz
-    });
-
-    // Dosyaları yaz
-    const reportId = String(report._id);
-    const dir = path.join(UPLOAD_ROOT, "report", reportId);
-    await ensureDir(dir);
-
-    const evidenceFiles = [];
-    const files = Array.isArray(req.files) ? req.files : [];
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
-      const ext = extFromMime(f.mimetype) || path.extname(f.originalname).toLowerCase() || ".bin";
-      const filename = `${String(i + 1).padStart(2, "0")}${ext}`;
-      const abs = path.join(dir, filename);
-      await fs.writeFile(abs, f.buffer);
-      absWritten.push(abs);
-
-      const rel = path.join("uploads", "report", reportId, filename).replace(/\\/g, "/");
-      evidenceFiles.push(makePublicUrl(rel));
-    }
-
-    report.evidenceFiles = evidenceFiles;
-    await report.save();
-
-    return res.status(201).json({
-      success: true,
-      message: "İhbar alındı",
-      report,
-    });
-  } catch (err) {
-    await cleanup(absWritten);
-    const msg =
-      err?.message === "INVALID_FILE_TYPE"
-        ? "Geçersiz dosya türü (sadece JPG, PNG, WEBP, PDF)."
-        : "Bir hata oluştu";
-    return res.status(500).json({ success: false, message: msg, error: err?.message });
   }
-});
+);
 
-/* ───────────────────────── CSV Export (admin) ───────────────────────── */
+/* ===================== GET /api/report (admin) ===================== */
 /**
- * GET /api/report/export.csv?status=pending|rejected&q=foo
+ * Admin listeleme / filtreleme
+ * ?page=1&limit=20&sort=-createdAt&status=open&q=search
  */
-router.get("/export.csv", requireAdmin, async (req, res) => {
+router.get("/", async (req, res, next) => {
   try {
-    const q = sanitize(req.query.q, 300);
-    const status = sanitize(req.query.status, 20);
+    const admin = isAdminRequest(req);
+    if (!admin) {
+      return fail(res, "Bu işlem için yetkiniz yok.", 403, "FORBIDDEN");
+    }
+
+    const page = Math.max(parseInt(req.query.page ?? "1", 10), 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit ?? "20", 10), 1),
+      100
+    );
+    const sort = (req.query.sort || "-createdAt").toString();
+
+    const status = (req.query.status || "").toString().trim();
+    const q = (req.query.q || "").toString().trim();
 
     const filter = {};
-    if (status && ["pending", "rejected"].includes(status)) filter.status = status;
+    if (status) filter.status = status;
+
     if (q) {
-      const R = rx(q);
+      const esc = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const R = new RegExp(esc, "i");
       filter.$or = [
-        { name: R }, { instagramUsername: R }, { instagramUrl: R },
-        { phone: R }, { desc: R }, { reporterEmail: R },
+        { name: R },
+        { instagramUsername: R },
+        { instagramUrl: R },
+        { phone: R },
+        { desc: R },
+        { reporterEmail: R },
       ];
     }
 
-    const items = await Report.find(filter).sort({ createdAt: -1 }).lean();
-
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="reports-${Date.now()}.csv"`);
-
-    const header = [
-      "createdAt","status","rejectReason","name","instagramUsername",
-      "instagramUrl","phone","reporterEmail","desc","evidenceFiles",
-    ];
-    res.write(header.join(";") + "\n");
-
-    for (const r of items) {
-      const row = [
-        r.createdAt ? new Date(r.createdAt).toISOString() : "",
-        r.status || "",
-        r.rejectReason || "",
-        r.name || "",
-        r.instagramUsername || "",
-        r.instagramUrl || "",
-        r.phone || "",
-        r.reporterEmail || "",
-        (r.desc || "").replace(/\s+/g, " ").slice(0, 1000),
-        (r.evidenceFiles || []).join(","),
-      ].map((v) => `"${String(v).replace(/"/g, '""')}"`);
-      res.write(row.join(";") + "\n");
-    }
-    res.end();
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Export hatası", error: err.message });
-  }
-});
-
-/* ───────────────────────── List (admin) ───────────────────────── */
-/**
- * GET /api/report?q=...&status=pending|rejected&page=1&limit=20
- */
-router.get("/", requireAdmin, async (req, res) => {
-  try {
-    const q = sanitize(req.query.q, 300);
-    const status = sanitize(req.query.status, 20);
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "20", 10), 1), 100);
-    const skip = (page - 1) * limit;
-
-    const filter = {};
-    if (status && ["pending", "rejected"].includes(status)) filter.status = status;
-    if (q) {
-      const R = rx(q);
-      filter.$or = [
-        { name: R }, { instagramUsername: R }, { instagramUrl: R },
-        { phone: R }, { desc: R }, { reporterEmail: R },
-      ];
-    }
-
-    const projection = "name instagramUsername instagramUrl phone desc status rejectReason reporterEmail evidenceFiles createdAt";
     const [items, total] = await Promise.all([
-      Report.find(filter).select(projection).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Report.find(filter)
+        .sort(sort)
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
       Report.countDocuments(filter),
     ]);
 
-    res.json({
-      success: true,
-      reports: items,
-      meta: { page, limit, total, pages: Math.ceil(total / limit) },
+    return ok(res, {
+      items,
+      page,
+      limit,
+      total,
+      hasMore: page * limit < total,
     });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
+  } catch (e) {
+    return next(e);
   }
 });
 
-/* ───────────────────────── Detail (admin) ───────────────────────── */
-router.get("/:id", requireAdmin, async (req, res) => {
+/* ===================== GET /api/report/:id ===================== */
+/**
+ * - Admin: tam detay
+ * - Public: sadece temel alanlar, kapalı kayıtları gösterme (isteğe göre)
+ */
+router.get("/:id", async (req, res, next) => {
   try {
-    const rep = await Report.findById(req.params.id).lean();
-    if (!rep) return res.status(404).json({ success: false, message: "İhbar bulunamadı" });
-    res.json({ success: true, report: rep });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
-
-/* ───────────────────────── Approve → Blacklist (admin) ───────────────────────── */
-router.post("/:id/approve", requireAdmin, async (req, res) => {
-  try {
-    const report = await Report.findById(req.params.id);
-    if (!report) return res.status(404).json({ success: false, message: "İhbar bulunamadı" });
-
-    const black = await Blacklist.create({
-      name: report.name,
-      instagramUsername: report.instagramUsername,
-      instagramUrl: report.instagramUrl,
-      phone: report.phone,
-      desc: report.desc,
-    });
-
-    await Report.findByIdAndDelete(req.params.id);
-
-    res.json({ success: true, message: "İhbar Blacklist’e taşındı", blacklist: black });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
-
-/* ───────────────────────── Reject (admin) ───────────────────────── */
-router.post("/:id/reject", requireAdmin, async (req, res) => {
-  try {
-    const rep = await Report.findById(req.params.id);
-    if (!rep) return res.status(404).json({ success: false, message: "İhbar bulunamadı" });
-
-    rep.status = "rejected";
-    rep.rejectReason = sanitize(req.body.reason, 500);
-    await rep.save();
-
-    res.json({ success: true, message: "İhbar reddedildi" });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
-
-/* ───────────────────────── Delete (admin) ───────────────────────── */
-router.delete("/:id", requireAdmin, async (req, res) => {
-  try {
-    await Report.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: "İhbar silindi" });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
-
-/* ───────────────────────── Blacklist CRUD (admin) ───────────────────────── */
-router.get("/blacklist/all", requireAdmin, async (req, res) => {
-  try {
-    const q = sanitize(req.query.q, 300);
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10), 1), 200);
-    const skip = (page - 1) * limit;
-
-    const filter = {};
-    if (q) {
-      const R = rx(q);
-      filter.$or = [
-        { name: R }, { instagramUsername: R }, { instagramUrl: R },
-        { phone: R }, { desc: R },
-      ];
+    const { id } = req.params;
+    if (!isValidObjectId(id)) {
+      return fail(res, "Geçersiz id", 400, "INVALID_ID");
     }
 
-    const [items, total] = await Promise.all([
-      Blacklist.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
-      Blacklist.countDocuments(filter),
-    ]);
+    const admin = isAdminRequest(req);
 
-    res.json({ success: true, blacklist: items, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
+    const doc = await (admin
+      ? Report.findById(id).lean()
+      : Report.findOne({ _id: id }).lean());
 
-router.put("/blacklist/:id", requireAdmin, async (req, res) => {
-  try {
-    const payload = {
-      name: sanitize(req.body.name, 120),
-      instagramUsername: sanitize(req.body.instagramUsername, 120),
-      instagramUrl: sanitize(req.body.instagramUrl, 400),
-      phone: sanitize(req.body.phone, 64),
-      desc: sanitize(req.body.desc, 2000),
-    };
-    const updated = await Blacklist.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true }).lean();
-    if (!updated) return res.status(404).json({ success: false, message: "Blacklist kaydı bulunamadı" });
-    res.json({ success: true, message: "Blacklist kaydı güncellendi", blacklist: updated });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
-  }
-});
+    if (!doc) {
+      return fail(res, "Bulunamadı", 404, "NOT_FOUND");
+    }
 
-router.delete("/blacklist/:id", requireAdmin, async (req, res) => {
-  try {
-    await Blacklist.findByIdAndDelete(req.params.id);
-    res.json({ success: true, message: "Blacklist kaydı silindi" });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Hata oluştu", error: err.message });
+    // public istekte hassas izleri istersek gizleyebiliriz:
+    if (!admin) {
+      delete doc.createdByIp;
+      delete doc.userAgent;
+      delete doc.reporterEmail;
+      delete doc.reporterPhone;
+    }
+
+    return ok(res, { report: doc });
+  } catch (e) {
+    return next(e);
   }
 });
 

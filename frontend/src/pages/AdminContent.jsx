@@ -1,11 +1,6 @@
+// frontend/src/components/AdminContent.jsx (veya bulunduğu dosya)
 import React, { useEffect, useState } from "react";
-import axios from "axios";
-
-const api = axios.create({
-  baseURL: (import.meta.env.VITE_API_URL ?? "").replace(/\/+$/, ""),
-  withCredentials: true,
-  headers: { Accept: "application/json", "x-admin-key": import.meta.env.VITE_ADMIN_KEY || "" },
-});
+import { api } from "../api/axios-boot"; // axios-boot içindeki paylaşılan instance
 
 export default function AdminContent() {
   const [tab, setTab] = useState("articles"); // "articles" | "pages"
@@ -37,19 +32,38 @@ function ArticlesAdmin() {
   const [form, setForm] = useState(blank);
 
   async function load() {
-    const { data } = await api.get("/api/cms/articles");
-    setItems(data.items || []);
+    try {
+      const { data } = await api.get("/cms/articles");
+      setItems(data.items || []);
+    } catch (e) {
+      console.error("Articles load error:", e);
+      alert("Makaleler yüklenemedi.");
+    }
   }
   useEffect(() => { load(); }, []);
 
   async function save(e){
     e.preventDefault();
-    const payload = { ...form, tags: String(form.tags||"").split(",").map(s=>s.trim()).filter(Boolean) };
-    if (editing) await api.put(`/api/cms/articles/${editing._id}`, payload);
-    else await api.post(`/api/cms/articles`, payload);
-    setForm(blank); setEditing(null); await load();
+    try {
+      const payload = { ...form, tags: String(form.tags||"").split(",").map(s=>s.trim()).filter(Boolean) };
+      if (editing) await api.put(`/cms/articles/${editing._id}`, payload);
+      else await api.post(`/cms/articles`, payload);
+      setForm(blank); setEditing(null); await load();
+    } catch (e) {
+      console.error("Save article error:", e);
+      alert("Kaydetme sırasında hata oluştu.");
+    }
   }
-  async function del(id){ if (confirm("Silinsin mi?")){ await api.delete(`/api/cms/articles/${id}`); await load(); } }
+  async function del(id){
+    if (!confirm("Silinsin mi?")) return;
+    try {
+      await api.delete(`/cms/articles/${id}`);
+      await load();
+    } catch (e) {
+      console.error("Delete article error:", e);
+      alert("Silme sırasında hata oluştu.");
+    }
+  }
 
   return (
     <>
@@ -121,16 +135,38 @@ function PagesAdmin() {
   const blank = { title:"", slug:"", content:"", status:"published", order:0, seoTitle:"", seoDescription:"", coverImage:"" };
   const [form, setForm] = useState(blank);
 
-  async function load(){ const {data}=await api.get("/api/cms/pages"); setItems(data.items||[]); }
+  async function load(){
+    try {
+      const {data}=await api.get("/cms/pages");
+      setItems(data.items||[]);
+    } catch (e) {
+      console.error("Pages load error:", e);
+      alert("Sayfalar yüklenemedi.");
+    }
+  }
   useEffect(()=>{ load(); }, []);
 
   async function save(e){
     e.preventDefault();
-    if (editing) await api.put(`/api/cms/pages/${editing._id}`, form);
-    else await api.post(`/api/cms/pages`, form);
-    setEditing(null); setForm(blank); await load();
+    try {
+      if (editing) await api.put(`/cms/pages/${editing._id}`, form);
+      else await api.post(`/cms/pages`, form);
+      setEditing(null); setForm(blank); await load();
+    } catch (e) {
+      console.error("Save page error:", e);
+      alert("Kaydetme sırasında hata oluştu.");
+    }
   }
-  async function del(id){ if (confirm("Silinsin mi?")){ await api.delete(`/api/cms/pages/${id}`); await load(); } }
+  async function del(id){
+    if (!confirm("Silinsin mi?")) return;
+    try {
+      await api.delete(`/cms/pages/${id}`);
+      await load();
+    } catch (e) {
+      console.error("Delete page error:", e);
+      alert("Silme sırasında hata oluştu.");
+    }
+  }
 
   return (
     <>
