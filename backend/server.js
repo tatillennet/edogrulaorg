@@ -1,7 +1,7 @@
-// backend/server.js — Ultra Pro Vercel Safe Edition
-
+// backend/server.js — Ultra Pro Vercel Edition
 import "dotenv/config";
 import express from "express";
+import mongoose from "mongoose";
 import cors from "cors";
 import morgan from "morgan";
 import helmet from "helmet";
@@ -10,7 +10,6 @@ import path from "path";
 import { fileURLToPath } from "url";
 import cookieParser from "cookie-parser";
 import fs from "fs";
-import mongoose from "mongoose";
 
 // Routes
 import authRoutes from "./routes/auth.js";
@@ -27,7 +26,6 @@ import { publicFeaturedRouter } from "./routes/admin.featured.js";
 import devSupwRoutes from "./routes/dev.supw.js";
 import cmsRouter from "./routes/cms.js";
 
-import User from "./models/User.js";
 import { authenticate, requireAdmin } from "./middleware/auth.js";
 
 /* =====================================================
@@ -38,41 +36,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "/tmp/uploads";
 
-/* =====================================================
-   MongoDB Bağlantısı (Vercel uyumlu)
-===================================================== */
-
-if (!process.env.MONGO_URI) {
-  console.error("❌ MONGO_URI tanımlı değil! .env / Vercel Environment Variables kontrol et.");
-} else {
-  // Tek seferlik global promise; serverless ortamlarda yeniden kullanılır
-  if (!global._mongoReady) {
-    mongoose.set("strictQuery", true);
-
-    global._mongoReady = mongoose
-      .connect(process.env.MONGO_URI, {
-        serverSelectionTimeoutMS: 8000,
-      })
-      .then(async () => {
-        console.log("✅ MongoDB bağlı");
-        try {
-          // Admin seed (idempotent)
-          if (typeof User.ensureAdminSeed === "function") {
-            await User.ensureAdminSeed();
-          }
-        } catch (e) {
-          console.warn("[bootstrap] ensureAdminSeed hata:", e?.message);
-        }
-      })
-      .catch((err) => {
-        console.error("❌ Mongo bağlantı hatası:", err?.message || err);
-      });
-  }
-}
-
-/* =====================================================
-   Uploads klasörü
-===================================================== */
+/* ------------ uploads klasörü ------------- */
 try {
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -82,6 +46,59 @@ try {
 }
 
 /* =====================================================
+   MongoDB (Vercel uyumlu, tek bağlantı, reuse)
+===================================================== */
+
+if (!process.env.MONGO_URI) {
+  console.error("❌ MONGO_URI tanımlı değil! (Vercel Project > Settings > Environment Variables)");
+}
+
+let mongoPromise = null;
+
+function getMongoConnection() {
+  if (!mongoPromise) {
+    if (!process.env.MONGO_URI) {
+      throw new Error("MONGO_URI missing");
+    }
+
+    mongoose.set("strictQuery", true);
+
+    mongoPromise = mongoose
+      .connect(process.env.MONGO_URI, {
+        serverSelectionTimeoutMS: 8000,
+        maxPoolSize: 10,
+      })
+      .then((conn) => {
+        console.log("✅ MongoDB bağlı");
+        return conn;
+      })
+      .catch((err) => {
+        console.error("❌ MongoDB bağlantı hatası:", err);
+        mongoPromise = null; // bir dahaki istekte yeniden denesin
+        throw err;
+      });
+  }
+  return mongoPromise;
+}
+
+// API isteklerinde (health hariç) Mongo hazır olsun
+app.use(async (req, res, next) => {
+  // root ve /api/health DB gerektirmesin
+  if (!req.path.startsWith("/api") || req.path === "/api/health") {
+    return next();
+  }
+
+  try {
+    await getMongoConnection();
+    return next();
+  } catch (err) {
+    return res
+      .status(500)
+      .json({ success: false, message: "DB bağlantı hatası" });
+  }
+});
+
+/* =====================================================
    Middleware
 ===================================================== */
 app.disable("x-powered-by");
@@ -89,7 +106,7 @@ app.disable("x-powered-by");
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: false, // SPA + API için sadeleştirilmiş
+    contentSecurityPolicy: false,
   })
 );
 
@@ -109,11 +126,7 @@ const allowedOrigins = [
 
 app.use(
   cors({
-    origin: (origin, cb) => {
-      // origin yoksa (SSR/fetch) veya listedeyse izin ver
-      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(null, false);
-    },
+    origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)),
     credentials: true,
   })
 );
@@ -128,7 +141,7 @@ app.get("/", (_req, res) => {
   res.json({
     success: true,
     message: "Backend çalışıyor 🚀",
-    env: process.env.NODE_ENV || "unknown",
+    env: process.env.NODE_ENV,
   });
 });
 
@@ -141,10 +154,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 /* =====================================================
-   API Routes
+   Routes
 ===================================================== */
 
-// Public & auth
+// Public + auth
 app.use("/api/auth", authRoutes);
 app.use("/api/businesses", businessRoutes);
 app.use("/api/apply", applyRoutes);
@@ -153,7 +166,7 @@ app.use("/api/reviews", reviewsRoutes);
 app.use("/api/explore", exploreRoutes);
 app.use("/api/google", googleRoutes);
 app.use("/api/blacklist", blacklistRoutes);
-app.use("/api/featured", publicFeaturedRouter); // ✅ Önemli: vitrin endpoint
+app.use("/api/featured", publicFeaturedRouter);
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/cms", cmsRouter);
 
@@ -170,7 +183,7 @@ app.get("/api/admin/_whoami", authenticate, requireAdmin, (req, res) => {
 
 app.use("/api/admin", authenticate, requireAdmin, adminRoutes);
 
-// Dev only
+// Dev (sadece local / non-prod)
 if (!isProd) {
   app.use("/api/dev", devSupwRoutes);
 }
@@ -191,14 +204,10 @@ app.use((req, res) => {
 // 500
 app.use((err, req, res, _next) => {
   console.error("❌ ERROR:", err);
-  res.status(500).json({
-    success: false,
-    message: "INTERNAL_ERROR",
-  });
+  res.status(500).json({ success: false, message: "INTERNAL_ERROR" });
 });
 
 /* =====================================================
-   Export (Vercel Serverless)
+   Export for Vercel (Serverless)
 ===================================================== */
-
 export default app;
