@@ -76,7 +76,12 @@ mongoose
    Middleware
 ===================================================== */
 app.disable("x-powered-by");
-app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" }, contentSecurityPolicy: false }));
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+    contentSecurityPolicy: false,
+  })
+);
 app.use(compression());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
@@ -109,6 +114,7 @@ app.get("/", (_req, res) => {
     env: process.env.NODE_ENV,
   });
 });
+
 app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
@@ -133,7 +139,13 @@ app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/cms", cmsRouter);
 
 app.get("/api/admin/_whoami", authenticate, requireAdmin, (req, res) => {
-  res.json({ you: { id: req.user?._id, email: req.user?.email, role: req.user?.role || "admin" } });
+  res.json({
+    you: {
+      id: req.user?._id,
+      email: req.user?.email,
+      role: req.user?.role || "admin",
+    },
+  });
 });
 app.use("/api/admin", authenticate, requireAdmin, adminRoutes);
 
@@ -146,8 +158,11 @@ if (!isProd) {
    Error Handling
 ===================================================== */
 app.use((req, res) => {
-  res.status(404).json({ success: false, message: "Endpoint bulunamadı", path: req.originalUrl });
+  res
+    .status(404)
+    .json({ success: false, message: "Endpoint bulunamadı", path: req.originalUrl });
 });
+
 app.use((err, req, res, _next) => {
   console.error("❌ ERROR:", err.message);
   res.status(500).json({ success: false, message: "INTERNAL_ERROR" });
