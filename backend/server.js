@@ -1,12 +1,10 @@
-// backend/server.js — Vercel Production Safe
+// backend/server.js — Vercel Safe Edition
 import "dotenv/config";
 import express from "express";
-import mongoose from "mongoose";
 import cors from "cors";
 import morgan from "morgan";
 import helmet from "helmet";
 import compression from "compression";
-import * as erl from "express-rate-limit";
 import path from "path";
 import { fileURLToPath } from "url";
 import cookieParser from "cookie-parser";
@@ -27,7 +25,6 @@ import { publicFeaturedRouter } from "./routes/admin.featured.js";
 import devSupwRoutes from "./routes/dev.supw.js";
 import cmsRouter from "./routes/cms.js";
 
-import User from "./models/User.js";
 import { authenticate, requireAdmin } from "./middleware/auth.js";
 
 /* =====================================================
@@ -36,10 +33,9 @@ import { authenticate, requireAdmin } from "./middleware/auth.js";
 const app = express();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
-const PORT = Number(process.env.PORT || 5000);
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "/tmp/uploads";
 
-// 📁 ensure uploads dir (Vercel uyumlu)
+// 📁 uploads klasörü oluştur
 try {
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -47,30 +43,6 @@ try {
 } catch (e) {
   console.warn("⚠️ uploads klasörü oluşturulamadı:", e.message);
 }
-
-/* =====================================================
-   MongoDB
-===================================================== */
-if (!process.env.MONGO_URI) {
-  console.error("❌ MONGO_URI tanımlı değil!");
-  process.exit(1);
-}
-
-mongoose.set("strictQuery", true);
-mongoose
-  .connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 8000 })
-  .then(async () => {
-    console.log("✅ MongoDB bağlı");
-    try {
-      await User.ensureAdminSeed();
-    } catch (e) {
-      console.warn("[bootstrap] ensureAdminSeed:", e?.message);
-    }
-  })
-  .catch((err) => {
-    console.error("Mongo bağlantı hatası:", err.message);
-    process.exit(1);
-  });
 
 /* =====================================================
    Middleware
@@ -158,9 +130,11 @@ if (!isProd) {
    Error Handling
 ===================================================== */
 app.use((req, res) => {
-  res
-    .status(404)
-    .json({ success: false, message: "Endpoint bulunamadı", path: req.originalUrl });
+  res.status(404).json({
+    success: false,
+    message: "Endpoint bulunamadı",
+    path: req.originalUrl,
+  });
 });
 
 app.use((err, req, res, _next) => {
@@ -169,6 +143,6 @@ app.use((err, req, res, _next) => {
 });
 
 /* =====================================================
-   Export for Vercel (serverless)
+   Export for Vercel (Serverless)
 ===================================================== */
 export default app;
