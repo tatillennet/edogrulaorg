@@ -100,7 +100,7 @@ mongoose
         e?.message
       );
     }
-    startServer();
+  
   })
   .catch((err) => {
     console.error(
@@ -663,3 +663,4 @@ function startServer() {
     }
   );
 }
+export default app;
