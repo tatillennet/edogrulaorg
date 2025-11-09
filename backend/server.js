@@ -1,4 +1,5 @@
-// backend/server.js — Vercel Safe Edition
+// backend/server.js — Ultra Pro Vercel Safe Edition
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -9,6 +10,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import cookieParser from "cookie-parser";
 import fs from "fs";
+import mongoose from "mongoose";
 
 // Routes
 import authRoutes from "./routes/auth.js";
@@ -25,6 +27,7 @@ import { publicFeaturedRouter } from "./routes/admin.featured.js";
 import devSupwRoutes from "./routes/dev.supw.js";
 import cmsRouter from "./routes/cms.js";
 
+import User from "./models/User.js";
 import { authenticate, requireAdmin } from "./middleware/auth.js";
 
 /* =====================================================
@@ -35,7 +38,41 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const isProd = process.env.NODE_ENV === "production";
 const UPLOADS_DIR = process.env.UPLOADS_DIR || "/tmp/uploads";
 
-// 📁 uploads klasörü oluştur
+/* =====================================================
+   MongoDB Bağlantısı (Vercel uyumlu)
+===================================================== */
+
+if (!process.env.MONGO_URI) {
+  console.error("❌ MONGO_URI tanımlı değil! .env / Vercel Environment Variables kontrol et.");
+} else {
+  // Tek seferlik global promise; serverless ortamlarda yeniden kullanılır
+  if (!global._mongoReady) {
+    mongoose.set("strictQuery", true);
+
+    global._mongoReady = mongoose
+      .connect(process.env.MONGO_URI, {
+        serverSelectionTimeoutMS: 8000,
+      })
+      .then(async () => {
+        console.log("✅ MongoDB bağlı");
+        try {
+          // Admin seed (idempotent)
+          if (typeof User.ensureAdminSeed === "function") {
+            await User.ensureAdminSeed();
+          }
+        } catch (e) {
+          console.warn("[bootstrap] ensureAdminSeed hata:", e?.message);
+        }
+      })
+      .catch((err) => {
+        console.error("❌ Mongo bağlantı hatası:", err?.message || err);
+      });
+  }
+}
+
+/* =====================================================
+   Uploads klasörü
+===================================================== */
 try {
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -48,12 +85,14 @@ try {
    Middleware
 ===================================================== */
 app.disable("x-powered-by");
+
 app.use(
   helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
-    contentSecurityPolicy: false,
+    contentSecurityPolicy: false, // SPA + API için sadeleştirilmiş
   })
 );
+
 app.use(compression());
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
@@ -61,17 +100,23 @@ app.use(cookieParser());
 app.use(morgan(isProd ? "tiny" : "dev"));
 
 // CORS
-const allowed = [
+const allowedOrigins = [
   "https://edogrula.org",
   "https://www.edogrula.org",
   "https://edogrulaorg-eaq4.vercel.app",
   "http://localhost:5173",
 ];
-const corsOptions = {
-  origin: (origin, cb) => cb(null, !origin || allowed.includes(origin)),
-  credentials: true,
-};
-app.use(cors(corsOptions));
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // origin yoksa (SSR/fetch) veya listedeyse izin ver
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    credentials: true,
+  })
+);
 
 // Static uploads
 app.use("/uploads", express.static(UPLOADS_DIR));
@@ -83,7 +128,7 @@ app.get("/", (_req, res) => {
   res.json({
     success: true,
     message: "Backend çalışıyor 🚀",
-    env: process.env.NODE_ENV,
+    env: process.env.NODE_ENV || "unknown",
   });
 });
 
@@ -96,8 +141,10 @@ app.get("/api/health", (_req, res) => {
 });
 
 /* =====================================================
-   Routes
+   API Routes
 ===================================================== */
+
+// Public & auth
 app.use("/api/auth", authRoutes);
 app.use("/api/businesses", businessRoutes);
 app.use("/api/apply", applyRoutes);
@@ -106,10 +153,11 @@ app.use("/api/reviews", reviewsRoutes);
 app.use("/api/explore", exploreRoutes);
 app.use("/api/google", googleRoutes);
 app.use("/api/blacklist", blacklistRoutes);
-app.use("/api/featured", publicFeaturedRouter);
+app.use("/api/featured", publicFeaturedRouter); // ✅ Önemli: vitrin endpoint
 app.use("/api/knowledge", knowledgeRoutes);
 app.use("/api/cms", cmsRouter);
 
+// Admin
 app.get("/api/admin/_whoami", authenticate, requireAdmin, (req, res) => {
   res.json({
     you: {
@@ -119,9 +167,10 @@ app.get("/api/admin/_whoami", authenticate, requireAdmin, (req, res) => {
     },
   });
 });
+
 app.use("/api/admin", authenticate, requireAdmin, adminRoutes);
 
-// Dev routes
+// Dev only
 if (!isProd) {
   app.use("/api/dev", devSupwRoutes);
 }
@@ -129,6 +178,8 @@ if (!isProd) {
 /* =====================================================
    Error Handling
 ===================================================== */
+
+// 404
 app.use((req, res) => {
   res.status(404).json({
     success: false,
@@ -137,12 +188,17 @@ app.use((req, res) => {
   });
 });
 
+// 500
 app.use((err, req, res, _next) => {
-  console.error("❌ ERROR:", err.message);
-  res.status(500).json({ success: false, message: "INTERNAL_ERROR" });
+  console.error("❌ ERROR:", err);
+  res.status(500).json({
+    success: false,
+    message: "INTERNAL_ERROR",
+  });
 });
 
 /* =====================================================
-   Export for Vercel (Serverless)
+   Export (Vercel Serverless)
 ===================================================== */
+
 export default app;
