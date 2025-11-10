@@ -1,14 +1,26 @@
+// backend/routes/knowledge.js
 import express from "express";
 import axios from "axios";
 
 const router = express.Router();
 
+// Ortak HTTP client (timeout ile)
+const http = axios.create({
+  timeout: 8000,
+});
+
 /**
- * Ortak iş: verilen q için place + wiki + weather verisini hazırlar.
+ * Verilen q için:
+ * - (opsiyonel) Google Places: konum + url
+ * - Wikipedia (TR): özet
+ * - (opsiyonel) Open-Meteo: hava durumu
  */
-async function buildKnowledge(qRaw) {
-  const q = (qRaw || "Sapanca").trim();
-  const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
+async function buildKnowledge(qInput) {
+  // Basit sanitizasyon
+  const raw = (qInput ?? "Sapanca").toString().trim();
+  const q = raw.slice(0, 120) || "Sapanca";
+
+  const GOOGLE_PLACES_API_KEY = process.env.GOOGLE_PLACES_API_KEY || "";
 
   let place = null;
   let wiki = null;
@@ -17,7 +29,7 @@ async function buildKnowledge(qRaw) {
   /* -------- 1) Google Places (opsiyonel) -------- */
   if (GOOGLE_PLACES_API_KEY) {
     try {
-      const ts = await axios.get(
+      const ts = await http.get(
         "https://maps.googleapis.com/maps/api/place/textsearch/json",
         {
           params: {
@@ -32,7 +44,7 @@ async function buildKnowledge(qRaw) {
       const cand = ts.data?.results?.[0];
 
       if (cand?.place_id) {
-        const det = await axios.get(
+        const det = await http.get(
           "https://maps.googleapis.com/maps/api/place/details/json",
           {
             params: {
@@ -44,35 +56,56 @@ async function buildKnowledge(qRaw) {
           }
         );
 
-        if (det.data?.result) {
-          place = { ...det.data.result, place_id: cand.place_id };
-        }
+        const r = det.data?.result || {};
+        place = {
+          place_id: cand.place_id,
+          name: r.name || cand.name || null,
+          address: r.formatted_address || null,
+          url: r.url || null,
+          geometry: r.geometry || cand.geometry || null,
+        };
       }
     } catch (err) {
       console.warn("[knowledge] Google Places hatası:", err.message);
     }
   }
 
-  /* -------- 2) Wikipedia (TR) -------- */
+  /* -------- 2) Wikipedia TR -------- */
   try {
-    const wikiRes = await axios.get(
+    const wikiRes = await http.get(
       `https://tr.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(
         q
-      )}`
+      )}`,
+      {
+        // 404 vs. durumlarda throw etmesin, biz kontrol ederiz
+        validateStatus: (status) => status >= 200 && status < 500,
+      }
     );
-    wiki = wikiRes.data;
+
+    if (wikiRes.status >= 200 && wikiRes.status < 300) {
+      wiki = wikiRes.data;
+    }
   } catch (err) {
     console.warn("[knowledge] Wikipedia hatası:", err.message);
   }
 
   /* -------- 3) Open-Meteo (koordinat varsa) -------- */
-  if (place?.geometry?.location) {
-    const { lat, lng } = place.geometry.location;
+  const loc =
+    place?.geometry?.location &&
+    typeof place.geometry.location.lat === "number" &&
+    typeof place.geometry.location.lng === "number"
+      ? {
+          lat: place.geometry.location.lat,
+          lng: place.geometry.location.lng,
+        }
+      : null;
+
+  if (loc) {
     try {
-      const wRes = await axios.get("https://api.open-meteo.com/v1/forecast", {
+      const wRes = await http.get("https://api.open-meteo.com/v1/forecast", {
         params: {
-          latitude: lat,
-          longitude: lng,
+          latitude: loc.lat,
+          longitude: loc.lng,
           current_weather: true,
           daily: "temperature_2m_max,temperature_2m_min,weathercode",
           timezone: "auto",
@@ -93,7 +126,7 @@ async function buildKnowledge(qRaw) {
   const subtitle = wiki?.description || "Bölge bilgisi";
   const summary = wiki?.extract || null;
   const wiki_url = wiki?.content_urls?.desktop?.page || null;
-  const coordinates = place?.geometry?.location || null;
+  const coordinates = loc || null;
   const gmap_url = place?.url || null;
 
   return {
@@ -110,51 +143,35 @@ async function buildKnowledge(qRaw) {
 }
 
 /**
+ * Ortak handler (tüm route alias'ları bunu kullanıyor)
+ */
+async function knowledgeRoute(req, res) {
+  try {
+    const data = await buildKnowledge(req.query.q);
+    // Biraz cache dostu olsun
+    res.set("Cache-Control", "public, max-age=600, s-maxage=600"); // 10 dk
+    res.json(data);
+  } catch (err) {
+    console.error("[knowledge] fatal error:", err);
+    res.status(500).json({
+      success: false,
+      error: "knowledge_fetch_failed",
+    });
+  }
+}
+
+/**
  * Ana endpoint:
  *   GET /api/knowledge?q=Sapanca
  */
-router.get("/", async (req, res) => {
-  try {
-    const data = await buildKnowledge(req.query.q);
-    res.json(data);
-  } catch (err) {
-    console.error("[knowledge] fatal error (/):", err);
-    res.status(500).json({
-      success: false,
-      error: "knowledge_fetch_failed",
-    });
-  }
-});
+router.get("/", knowledgeRoute);
 
 /**
- * Ek aliaslar (geri uyumluluk için):
+ * Alias'lar (geri uyumluluk):
  *   GET /api/knowledge/geo?q=Sapanca
  *   GET /api/knowledge/geo/knowledge?q=Sapanca
  */
-router.get("/geo", async (req, res) => {
-  try {
-    const data = await buildKnowledge(req.query.q);
-    res.json(data);
-  } catch (err) {
-    console.error("[knowledge] fatal error (/geo):", err);
-    res.status(500).json({
-      success: false,
-      error: "knowledge_fetch_failed",
-    });
-  }
-});
-
-router.get("/geo/knowledge", async (req, res) => {
-  try {
-    const data = await buildKnowledge(req.query.q);
-    res.json(data);
-  } catch (err) {
-    console.error("[knowledge] fatal error (/geo/knowledge):", err);
-    res.status(500).json({
-      success: false,
-      error: "knowledge_fetch_failed",
-    });
-  }
-});
+router.get("/geo", knowledgeRoute);
+router.get("/geo/knowledge", knowledgeRoute);
 
 export default router;
