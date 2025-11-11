@@ -20,16 +20,13 @@ function normalizeOrigin(raw) {
     t = `http://${RAW}`;
   }
 
-  // Sondaki "/" ve "/api" kaldır
   return t.replace(/\/+$/, "").replace(/\/api$/i, "");
 }
 
-// Ortak origin seçimi
 const ORIGIN = normalizeOrigin(
   import.meta.env.VITE_API_URL || import.meta.env.VITE_API_ROOT
 );
 
-// Tüm isteklerin gideceği root: "<origin>/api"
 export const API_ROOT = `${ORIGIN}/api`;
 
 // ---- Token helpers ----
@@ -38,8 +35,8 @@ const TOKEN_KEY = "token";
 const sanitizeToken = (v) =>
   String(v || "")
     .trim()
-    .replace(/^["']+|["']+$/g, "") // baş/son tırnakları at
-    .replace(/[\r\n\t]/g, ""); // gizli whitespace temizle
+    .replace(/^["']+|["']+$/g, "")
+    .replace(/[\r\n\t]/g, "");
 
 export function setAuthToken(token) {
   try {
@@ -49,17 +46,13 @@ export function setAuthToken(token) {
     } else {
       window.localStorage?.removeItem(TOKEN_KEY);
     }
-  } catch {
-    // localStorage erişilemezse sessiz geç
-  }
+  } catch {}
 }
 
 export function clearAuthToken() {
   try {
     window.localStorage?.removeItem(TOKEN_KEY);
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
 
 export function getAuthToken() {
@@ -71,40 +64,26 @@ export function getAuthToken() {
   }
 }
 
-// İsteğe bağlı: 401 olduğunda tetiklenecek callback (örn. logout yönlendirmesi)
 let onUnauthorized = null;
-
 export function setOnUnauthorized(fn) {
   onUnauthorized = typeof fn === "function" ? fn : null;
 }
 
-/* ---------------- Anti-adblock fallback ----------------
-   - /report*     → /rpt*
-   - /blacklist*  → /blk*
-   - /admin/*     → /_adm/*
-   Hem tam URL hem relatif path destekler.
---------------------------------------------------------*/
+/* ---------------- Anti-adblock fallback ---------------- */
 function remapForAdblock(pathLike) {
   const u = String(pathLike || "");
 
-  // Tam URL ise URL API ile parçala
   try {
     if (/^https?:\/\//i.test(u)) {
       const url = new URL(u);
       url.pathname = remapForAdblock(url.pathname);
       return url.origin + url.pathname + url.search + url.hash;
     }
-  } catch {
-    // Geçersiz URL ise normal flow'a düş
-  }
+  } catch {}
 
   let p = u;
-
-  // /report → /rpt
   p = p.replace(/\/report(\/|$)/gi, "/rpt$1");
-  // /blacklist → /blk
   p = p.replace(/\/blacklist(\/|$)/gi, "/blk$1");
-  // /admin/ → /_adm/
   p = p.replace(/\/admin\//gi, "/_adm/");
 
   return p;
@@ -113,13 +92,11 @@ function remapForAdblock(pathLike) {
 const RETRY_FLAG = "__antiBlockRetried";
 const METHODS_WITH_BODY = new Set(["post", "put", "patch", "delete"]);
 
-// Cancel tespiti (Axios v1 & tarayıcı Abort)
 const isCancel = (e) =>
   e?.code === "ERR_CANCELED" ||
   e?.name === "CanceledError" ||
   (typeof axios.isCancel === "function" && axios.isCancel(e));
 
-/* ---------------- Axios instance ---------------- */
 const API = axios.create({
   baseURL: API_ROOT,
   withCredentials: true,
@@ -131,11 +108,10 @@ const API = axios.create({
 });
 
 if (import.meta.env.DEV) {
-  // Hangi origin'e gittiğimizi net görmek için
   console.log("[axios-boot] API_ROOT =", API_ROOT);
 }
 
-/* ------------ Request interceptor ------------ */
+/* ------------ Request ------------ */
 API.interceptors.request.use((config) => {
   const cfg = config || {};
   cfg.headers = cfg.headers || {};
@@ -152,7 +128,6 @@ API.interceptors.request.use((config) => {
       (typeof Blob !== "undefined" && data instanceof Blob) ||
       (typeof ArrayBuffer !== "undefined" && data instanceof ArrayBuffer));
 
-  // JSON body için Content-Type ayarla
   if (
     hasBodyMethod &&
     data != null &&
@@ -162,7 +137,6 @@ API.interceptors.request.use((config) => {
     cfg.headers["Content-Type"] = "application/json";
   }
 
-  // localStorage token varsa Authorization ekle
   const tok = getAuthToken();
   if (tok) {
     cfg.headers.Authorization = `Bearer ${tok}`;
@@ -171,31 +145,26 @@ API.interceptors.request.use((config) => {
   return cfg;
 });
 
-/* ------------ Response interceptor ------------ */
+/* ------------ Response ------------ */
 API.interceptors.response.use(
   (res) => res,
   async (err) => {
-    // İptal edilen istekler: zinciri hata göstermeden sonlandır
     if (isCancel(err)) {
-      return new Promise(() => {}); // unresolved promise: UI'yi kirletmez
+      return new Promise(() => {});
     }
 
     const status = err?.response?.status;
 
-    // 401 → token temizle + callback
     if (status === 401) {
       clearAuthToken();
       if (onUnauthorized) {
         try {
           onUnauthorized(err);
-        } catch {
-          // callback hatasını yut
-        }
+        } catch {}
       }
       return Promise.reject(err);
     }
 
-    // Adblock / network-case: response yok veya "blocked"/"network error"
     const looksBlocked =
       !err?.response &&
       (err?.code === "ERR_BLOCKED_BY_CLIENT" ||
@@ -205,8 +174,6 @@ API.interceptors.response.use(
 
     const cfg = err?.config || {};
     const urlStr = String(cfg.url || "");
-
-    // Sadece belirli path'lerde retry dene
     const isEligiblePath =
       urlStr && /(\/|^)(admin|report|blacklist)(\/|$)/i.test(urlStr);
 
@@ -218,7 +185,6 @@ API.interceptors.response.use(
         if (import.meta.env.DEV) {
           console.debug("[axios-boot] Adblock remap:", urlStr, "→", remapped);
         }
-
         const newCfg = { ...cfg, url: remapped };
         try {
           return await API.request(newCfg);

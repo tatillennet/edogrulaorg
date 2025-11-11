@@ -1,43 +1,43 @@
 // src/api/base.js
-const RAW = (import.meta.env.VITE_API_URL || "").trim().replace(/\/+$/, "");
-
-// API_ROOT: daima .../api ile biter. RAW yoksa same-origin "/api"
-export const API_ROOT = RAW ? (RAW.endsWith("/api") ? RAW : `${RAW}/api`) : "/api";
+import { API_ROOT } from "../lib/axios-boot";
 
 /**
  * apiPath(p):
- *  - Mutlak URL ise (http/https) olduğu gibi geri döndürür.
- *  - Onun dışında daima GÖRELİ bir path döndürür ("/admin/...", "/report/..."),
- *    kesinlikle "/api" ile başlamaz (çift /api'yi engeller).
+ *  - Mutlak URL ise (http/https) olduğu gibi döndürür.
+ *  - Diğer durumlarda:
+ *      * başına "/" ekler
+ *      * öndeki "/api" varsa söker (çift /api engeli)
  */
 export function apiPath(p = "/") {
   let s = String(p || "").trim();
 
-  // 1) Mutlak URL ise aynen kullan
+  // Mutlak URL
   if (/^https?:\/\//i.test(s)) return s;
 
-  // 2) Baştaki "/" garanti et
+  // Baştaki "/" garanti
   s = s ? (s.startsWith("/") ? s : `/${s}`) : "/";
 
-  // 3) "/api" önekini sök (çift /api'yi engelle)
+  // Öndeki /api'yi temizle
   if (s === "/api") s = "/";
-  else if (s.startsWith("/api/")) s = s.slice(4); // "/api".length === 4
+  else if (s.startsWith("/api/")) s = s.slice(4);
 
-  // 4) Çift slash normalize (http:// şeması yok, güvenli)
+  // Çift slash temizle
   s = s.replace(/([^:]\/)\/+/g, "$1");
 
-  // Artık s göreli bir path: "/", "/admin/...", "/report/..." vb.
-  return s;
+  return s; // her zaman göreli path ("/admin/...", "/report/..." vs)
 }
 
 /**
  * apiUrl(p):
  *  - Mutlak URL ise aynen döner.
- *  - Göreli path ise API_ROOT ile birleştirir → tam URL üretir.
+ *  - Göreli path ise API_ROOT ile birleştirir.
  */
 export function apiUrl(p = "/") {
   const path = apiPath(p);
-  if (/^https?:\/\//i.test(path)) return path; // zaten mutlak
+  if (/^https?:\/\//i.test(path)) return path;
   const root = API_ROOT.replace(/\/+$/, "");
   return `${root}${path}`;
 }
+
+// Geriye dönük: API_ROOT'u da dışa ver
+export { API_ROOT };
