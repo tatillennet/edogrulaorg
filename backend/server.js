@@ -1,4 +1,5 @@
-// backend/server.js — Ultra Pro Vercel Edition
+// backend/server.js — e-dogrula: Vercel + Local uyumlu
+
 import "dotenv/config";
 import express from "express";
 import mongoose from "mongoose";
@@ -31,12 +32,22 @@ import { authenticate, requireAdmin } from "./middleware/auth.js";
 /* =====================================================
    App bootstrap
 ===================================================== */
-const app = express();
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const isProd = process.env.NODE_ENV === "production";
-const UPLOADS_DIR = process.env.UPLOADS_DIR || "/tmp/uploads";
 
-/* ------------ uploads klasörü ------------- */
+const app = express();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const isProd = process.env.NODE_ENV === "production";
+const isVercel = !!process.env.VERCEL;
+
+// Uploads klasörü:
+// - Vercel: /tmp/uploads (ephemeral ama uyumlu)
+// - Local: backend/uploads
+const UPLOADS_DIR =
+  process.env.UPLOADS_DIR ||
+  (isVercel ? "/tmp/uploads" : path.join(__dirname, "uploads"));
+
 try {
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -46,11 +57,11 @@ try {
 }
 
 /* =====================================================
-   MongoDB (Vercel uyumlu, tek bağlantı, reuse)
+   MongoDB (tek bağlantı, reuse)
 ===================================================== */
 
 if (!process.env.MONGO_URI) {
-  console.error("❌ MONGO_URI tanımlı değil! (Vercel Project > Settings > Environment Variables)");
+  console.error("❌ MONGO_URI tanımlı değil! Environment'a eklemen gerekiyor.");
 }
 
 let mongoPromise = null;
@@ -74,16 +85,15 @@ function getMongoConnection() {
       })
       .catch((err) => {
         console.error("❌ MongoDB bağlantı hatası:", err);
-        mongoPromise = null; // bir dahaki istekte yeniden denesin
+        mongoPromise = null; // sonraki istekte yeniden denesin
         throw err;
       });
   }
   return mongoPromise;
 }
 
-// API isteklerinde (health hariç) Mongo hazır olsun
+// API isteklerinde (root ve /api/health hariç) Mongo hazır olsun
 app.use(async (req, res, next) => {
-  // root ve /api/health DB gerektirmesin
   if (!req.path.startsWith("/api") || req.path === "/api/health") {
     return next();
   }
@@ -91,7 +101,7 @@ app.use(async (req, res, next) => {
   try {
     await getMongoConnection();
     return next();
-  } catch (err) {
+  } catch (_err) {
     return res
       .status(500)
       .json({ success: false, message: "DB bağlantı hatası" });
@@ -101,6 +111,7 @@ app.use(async (req, res, next) => {
 /* =====================================================
    Middleware
 ===================================================== */
+
 app.disable("x-powered-by");
 
 app.use(
@@ -126,7 +137,12 @@ const allowedOrigins = [
 
 app.use(
   cors({
-    origin: (origin, cb) => cb(null, !origin || allowedOrigins.includes(origin)),
+    origin(origin, cb) {
+      // origin yoksa (Postman, curl vs) izin ver
+      if (!origin) return cb(null, true);
+      const allowed = allowedOrigins.includes(origin);
+      return cb(null, allowed);
+    },
     credentials: true,
   })
 );
@@ -137,6 +153,7 @@ app.use("/uploads", express.static(UPLOADS_DIR));
 /* =====================================================
    Health & Diagnostics
 ===================================================== */
+
 app.get("/", (_req, res) => {
   res.json({
     success: true,
@@ -208,6 +225,22 @@ app.use((err, req, res, _next) => {
 });
 
 /* =====================================================
-   Export for Vercel (Serverless)
+   Çalıştırma Modu
+   - Vercel: VERCEL env varsa sadece `export default app`
+   - Local: dosya direkt çalıştırıldıysa port aç
 ===================================================== */
+
+const isDirectRun =
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (!isVercel && isDirectRun) {
+  const PORT = process.env.PORT || 4000;
+  app.listen(PORT, () => {
+    console.log(
+      `🚀 e-dogrula backend localde çalışıyor: http://localhost:${PORT}`
+    );
+  });
+}
+
 export default app;
